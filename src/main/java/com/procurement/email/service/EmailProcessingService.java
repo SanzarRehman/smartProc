@@ -470,6 +470,22 @@ public class EmailProcessingService {
     }
 
     /**
+     * Creates a copy of the email with cleaned body (no quoted replies).
+     */
+    private EmailMessage createCleanedEmailCopy(EmailMessage original) {
+        EmailMessage cleaned = new EmailMessage();
+        cleaned.setMessageId(original.getMessageId());
+        cleaned.setFrom(original.getFrom());
+        cleaned.setSubject(original.getSubject());
+        cleaned.setBody(extractUserReply(original.getBody()));
+        cleaned.setReceivedDate(original.getReceivedDate());
+        cleaned.setProcessed(original.isProcessed());
+        cleaned.setInReplyTo(original.getInReplyTo());
+        cleaned.setReferences(original.getReferences());
+        return cleaned;
+    }
+    
+    /**
      * Extracts only the user's reply from an email body, removing quoted text.
      * Handles common email reply patterns like "On ... wrote:", Gmail quote blocks, etc.
      */

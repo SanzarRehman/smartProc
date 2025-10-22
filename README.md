@@ -18,6 +18,7 @@ This system demonstrates an automated procurement workflow that:
 
 - **Java 17 or higher** - Required for Spring Boot 3.x
 - **Maven 3.8+** - Build tool
+- **PostgreSQL 12+** - Database server
 - **Email account with IMAP access** - Gmail, Outlook, or any IMAP-enabled email
 - **Keycloak server** (optional for POC) - Can run locally via Docker
 - **Gemini API key** - Get from Google AI Studio
@@ -32,11 +33,41 @@ cd procurement-email-automation
 mvn clean package
 ```
 
-### 2. Set Environment Variables
+### 2. Setup PostgreSQL Database
+
+**Option A: Using existing PostgreSQL**
+```bash
+# Connect to PostgreSQL
+psql -U postgres
+
+# Create database and user
+CREATE DATABASE mydb;
+CREATE USER admin WITH PASSWORD 'admin123';
+GRANT ALL PRIVILEGES ON DATABASE mydb TO admin;
+\q
+```
+
+**Option B: Using Docker**
+```bash
+docker run --name procurement-postgres \
+  -e POSTGRES_DB=mydb \
+  -e POSTGRES_USER=admin \
+  -e POSTGRES_PASSWORD=admin123 \
+  -p 5432:5432 \
+  -d postgres:15
+```
+
+### 3. Set Environment Variables
 
 Create a `.env` file or export these variables:
 
 ```bash
+# Database Configuration
+export DATABASE_URL=jdbc:postgresql://localhost:5432/mydb
+export DATABASE_USERNAME=admin
+export DATABASE_PASSWORD=admin123
+export DDL_AUTO=update  # Use 'update' to preserve data, 'create-drop' to reset on restart
+
 # Email Configuration (Gmail example)
 export EMAIL_HOST=imap.gmail.com
 export EMAIL_PORT=993
