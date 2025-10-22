@@ -22,25 +22,30 @@ spring:
             enable: true
           timeout: 10000
 
-  # Database Configuration
+  # Database Configuration - PostgreSQL
   datasource:
-    url: jdbc:h2:mem:procurementdb
-    driver-class-name: org.h2.Driver
-    username: sa
-    password:
+    url: ${DATABASE_URL:jdbc:postgresql://localhost:5432/mydb}
+    driver-class-name: org.postgresql.Driver
+    username: ${DATABASE_USERNAME:admin}
+    password: ${DATABASE_PASSWORD:admin123}
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 5
+      connection-timeout: 30000
 
   h2:
     console:
-      enabled: true
-      path: /h2-console
+      enabled: false  # Disabled when using PostgreSQL
 
   jpa:
     hibernate:
-      ddl-auto: create-drop
+      ddl-auto: ${DDL_AUTO:update}  # Use 'update' for PostgreSQL, 'create-drop' for dev/test
     show-sql: true
     properties:
       hibernate:
         format_sql: true
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+    database-platform: org.hibernate.dialect.PostgreSQLDialect
 
 # Keycloak Configuration
 keycloak:

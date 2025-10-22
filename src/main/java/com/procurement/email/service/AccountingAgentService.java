@@ -16,6 +16,7 @@ import java.util.UUID;
 /**
  * Service responsible for simulating general ledger updates for procurement transactions.
  * This service handles accounting entries for both inventory allocations and new purchases.
+ * Also updates inventory quantities when items are allocated.
  */
 @Service
 @RequiredArgsConstructor
@@ -23,6 +24,7 @@ import java.util.UUID;
 public class AccountingAgentService {
     
     private final GeneralLedgerEntryRepository generalLedgerEntryRepository;
+    private final InventoryService inventoryService;
     
     private static final String TRANSACTION_TYPE_ALLOCATION = "ALLOCATION";
     private static final String TRANSACTION_TYPE_PURCHASE = "PURCHASE";
@@ -33,6 +35,7 @@ public class AccountingAgentService {
     /**
      * Records a general ledger entry for inventory allocation.
      * Creates a debit to Fixed Assets and credit to Inventory.
+     * Also decrements the inventory quantity.
      * 
      * @param item the item being allocated from inventory
      * @param requester the user context of the requester
@@ -59,6 +62,9 @@ public class AccountingAgentService {
                 requester.getRole()));
         
         generalLedgerEntryRepository.save(glEntry);
+        
+        // Update inventory quantity
+        inventoryService.decrementItemQuantity(item.getId(), 1);
         
         log.info("Successfully recorded inventory allocation GL entry with reference: {}", allocationId);
     }

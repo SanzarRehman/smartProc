@@ -168,6 +168,16 @@ public class EmailProcessingService {
             
             if (state == null) {
                 log.warn("No processing state found for confirmation email from: {}", email.getFrom());
+                
+                // Check if this is actually a new request that was misclassified
+                // If the email has "In-Reply-To" header, it's definitely a reply
+                if (email.getInReplyTo() == null || email.getInReplyTo().isEmpty()) {
+                    log.info("Email has no In-Reply-To header, treating as new request");
+                    processIncomingEmail(email);
+                    return;
+                }
+                
+                // It's a reply but we can't find the state - send error
                 emailSenderService.sendErrorEmail(email.getFrom(), 
                     "We could not find your original procurement request. Please submit a new request.");
                 return;
@@ -420,7 +430,7 @@ public class EmailProcessingService {
             }
         }
         
-        // Strategy 2: Look for "Option X" pattern
+        // Strategy 2: Look for "Option X" pattern and extract item ID from the full email body
         if (selectedItem == null) {
             java.util.regex.Pattern optionPattern = java.util.regex.Pattern.compile("option\\s+(\\d+)", 
                                                                                     java.util.regex.Pattern.CASE_INSENSITIVE);
@@ -428,30 +438,94 @@ public class EmailProcessingService {
             
             if (optionMatcher.find()) {
                 int optionNumber = Integer.parseInt(optionMatcher.group(1));
-                // Map option number to item ID (based on recommendation order)
-                // This is a simplified approach - in production, store the mapping in state
-                String[] itemIds = {"LAP-001", "LAP-002", "LAP-003"}; // Default laptop order
-                if (optionNumber > 0 && optionNumber <= itemIds.length) {
-                    selectedItem = inventoryService.getItemById(itemIds[optionNumber - 1]);
-                    if (selectedItem != null) {
-                        log.info("Found item by option number: Option {} -> {}", optionNumber, selectedItem.getName());
+                log.info("User selected Option {}, searching in full email for corresponding item ID", optionNumber);
+                
+                // Look in the FULL email body (including quoted text) to find the item ID for this option
+                String fullBody = email.getBody();
+                
+                // Find all "Option X:" headers in the email
+                java.util.regex.Pattern optionHeaderPattern = java.util.regex.Pattern.compile(
+                    "Option\\s+(\\d+):\\s+([^<\\n]+)", 
+                    java.util.regex.Pattern.CASE_INSENSITIVE);
+                java.util.regex.Matcher headerMatcher = optionHeaderPattern.matcher(fullBody);
+                
+                int currentOption = 0;
+                while (headerMatcher.find()) {
+                    currentOption++;
+                    if (currentOption == optionNumber) {
+                        String itemName = headerMatcher.group(2).trim();
+                        log.info("Found Option {} in email: {}", optionNumber, itemName);
+                        
+                        // Now find the Item ID for this option in the quoted email
+                        // Look for "Item ID: XXX-###" after this option header
+                        int startPos = headerMatcher.end();
+                        int endPos = Math.min(startPos + 500, fullBody.length()); // Search next 500 chars
+                        String optionSection = fullBody.substring(startPos, endPos);
+                        
+                        java.util.regex.Pattern itemIdPattern = java.util.regex.Pattern.compile(
+                            "Item ID:\\s*<[^>]*>\\s*([A-Z]+-\\d+)", 
+                            java.util.regex.Pattern.CASE_INSENSITIVE);
+                        java.util.regex.Matcher itemIdMatcher = itemIdPattern.matcher(optionSection);
+                        
+                        if (itemIdMatcher.find()) {
+                            String itemId = itemIdMatcher.group(1).toUpperCase();
+                            selectedItem = inventoryService.getItemById(itemId);
+                            if (selectedItem != null) {
+                                log.info("Found item by option number: Option {} -> {} ({})", 
+                                        optionNumber, selectedItem.getName(), itemId);
+                            }
+                        } else {
+                            // Try without HTML tags
+                            java.util.regex.Pattern simpleIdPattern = java.util.regex.Pattern.compile(
+                                "Item ID:\\s*([A-Z]+-\\d+)", 
+                                java.util.regex.Pattern.CASE_INSENSITIVE);
+                            java.util.regex.Matcher simpleIdMatcher = simpleIdPattern.matcher(optionSection);
+                            if (simpleIdMatcher.find()) {
+                                String itemId = simpleIdMatcher.group(1).toUpperCase();
+                                selectedItem = inventoryService.getItemById(itemId);
+                                if (selectedItem != null) {
+                                    log.info("Found item by option number: Option {} -> {} ({})", 
+                                            optionNumber, selectedItem.getName(), itemId);
+                                }
+                            }
+                        }
+                        break;
                     }
                 }
             }
         }
         
-        // Strategy 3: Look for item names (MacBook Pro, Dell XPS, ThinkPad, etc.)
+        // Strategy 3: Look for item names in the user's reply
         if (selectedItem == null) {
-            // Check for common laptop names
+            // Check for laptops
             if (bodyLower.contains("macbook")) {
                 selectedItem = inventoryService.getItemById("LAP-002");
                 log.info("Found MacBook by name match");
-            } else if (bodyLower.contains("dell") || bodyLower.contains("xps")) {
+            } else if (bodyLower.contains("dell") && (bodyLower.contains("xps") || bodyLower.contains("laptop"))) {
                 selectedItem = inventoryService.getItemById("LAP-001");
                 log.info("Found Dell XPS by name match");
             } else if (bodyLower.contains("thinkpad")) {
                 selectedItem = inventoryService.getItemById("LAP-003");
                 log.info("Found ThinkPad by name match");
+            }
+            // Check for monitors
+            else if (bodyLower.contains("lg") && bodyLower.contains("4k")) {
+                selectedItem = inventoryService.getItemById("MON-002");
+                log.info("Found LG 4K by name match");
+            } else if (bodyLower.contains("dell") && bodyLower.contains("ultrasharp")) {
+                selectedItem = inventoryService.getItemById("MON-001");
+                log.info("Found Dell UltraSharp by name match");
+            } else if (bodyLower.contains("samsung") && bodyLower.contains("curved")) {
+                selectedItem = inventoryService.getItemById("MON-003");
+                log.info("Found Samsung Curved by name match");
+            }
+            // Check for accessories
+            else if (bodyLower.contains("logitech") && bodyLower.contains("mx keys")) {
+                selectedItem = inventoryService.getItemById("ACC-001");
+                log.info("Found Logitech MX Keys by name match");
+            } else if (bodyLower.contains("logitech") && bodyLower.contains("mx master")) {
+                selectedItem = inventoryService.getItemById("ACC-003");
+                log.info("Found Logitech MX Master by name match");
             }
         }
         

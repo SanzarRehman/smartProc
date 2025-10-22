@@ -110,6 +110,7 @@ public class IntegrationFlowConfig {
     /**
      * Error channel handler for failed messages.
      * Logs errors and attempts recovery where possible.
+     * Does NOT log the full email body to avoid cluttering logs.
      */
     @Bean
     @ServiceActivator(inputChannel = "errorChannel")
@@ -120,12 +121,18 @@ public class IntegrationFlowConfig {
                 Throwable throwable = errorMessage.getPayload();
                 Message<?> failedMessage = errorMessage.getOriginalMessage();
                 
-                log.error("Error channel received failed message. Error: {}", throwable.getMessage(), throwable);
+                log.error("Error channel received failed message. Error: {}", throwable.getMessage());
                 
                 if (failedMessage != null && failedMessage.getPayload() instanceof EmailMessage) {
                     EmailMessage email = (EmailMessage) failedMessage.getPayload();
-                    log.error("Failed email details - From: {}, Subject: {}, MessageId: {}", 
-                            email.getFrom(), email.getSubject(), email.getMessageId());
+                    
+                    // Log only essential details, not the full body
+                    String bodyPreview = email.getBody() != null && email.getBody().length() > 100 
+                        ? email.getBody().substring(0, 100) + "..." 
+                        : email.getBody();
+                    
+                    log.error("Failed email - From: {}, Subject: {}, MessageId: {}, Body preview: {}", 
+                            email.getFrom(), email.getSubject(), email.getMessageId(), bodyPreview);
                     
                     // Attempt to send error notification to user
                     try {
@@ -136,7 +143,7 @@ public class IntegrationFlowConfig {
                     }
                 }
             } else {
-                log.error("Error channel received non-ErrorMessage: {}", message);
+                log.error("Error channel received non-ErrorMessage type");
             }
         };
     }
@@ -145,31 +152,49 @@ public class IntegrationFlowConfig {
 
     /**
      * Determines if an email is a confirmation response.
-     * Checks subject line and body content for confirmation indicators.
+     * Checks In-Reply-To header first (most reliable), then subject and body.
+     * Uses only the first 500 characters of body to avoid processing huge quoted chains.
      */
     private boolean isConfirmationEmail(EmailMessage email) {
         if (email == null) {
             return false;
         }
         
-        String subject = email.getSubject() != null ? email.getSubject().toLowerCase() : "";
-        String body = email.getBody() != null ? email.getBody().toLowerCase() : "";
+        // Most reliable: Check if this is a reply using email headers
+        boolean isReply = email.getInReplyTo() != null && !email.getInReplyTo().isEmpty();
         
-        // Check for confirmation keywords in subject
-        boolean subjectMatch = subject.contains("re:") || 
-                               subject.contains("confirmation") || 
+        String subject = email.getSubject() != null ? email.getSubject().toLowerCase() : "";
+        
+        // Only check first 500 chars of body to avoid processing entire quoted chain
+        String body = email.getBody() != null ? email.getBody().toLowerCase() : "";
+        if (body.length() > 500) {
+            body = body.substring(0, 500);
+        }
+        
+        // If it's a reply (has In-Reply-To header), check if it looks like a confirmation
+        if (isReply) {
+            // Check for confirmation indicators in body
+            boolean hasConfirmationIndicators = 
+                body.contains("confirm") || 
+                body.contains("yes") || 
+                body.contains("approve") ||
+                body.contains("accept") ||
+                body.contains("option") ||  // "Option 1", "Option 2", etc.
+                body.contains("lap-") ||  // Item ID patterns
+                body.contains("mon-") ||
+                body.contains("acc-") ||
+                body.contains("macbook") ||
+                body.contains("dell") ||
+                body.contains("thinkpad");
+            
+            return hasConfirmationIndicators;
+        }
+        
+        // If not a reply, check subject for explicit confirmation keywords
+        boolean subjectMatch = subject.contains("confirmation") || 
                                subject.contains("confirm") ||
                                subject.contains("approve");
         
-        // Check for confirmation keywords in body
-        boolean bodyMatch = body.contains("confirm") || 
-                           body.contains("yes") || 
-                           body.contains("approve") ||
-                           body.contains("accept") ||
-                           body.contains("lap-") ||  // Item ID patterns
-                           body.contains("mon-") ||
-                           body.contains("acc-");
-        
-        return subjectMatch || bodyMatch;
+        return subjectMatch;
     }
 }
