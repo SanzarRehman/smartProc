@@ -1,0 +1,79 @@
+spring:
+  application:
+    name: procurement-email-automation
+    profiles:
+       active: dev
+
+  # Email Configuration
+  mail:
+    host: ${EMAIL_HOST:imap.gmail.com}
+    port: ${EMAIL_PORT:993}
+    username: ${EMAIL_USERNAME:procurementpoc2025@gmail.coms}
+    password: ${EMAIL_PASSWORD:nyez ixnu lsei dmmf}
+    protocol: ${EMAIL_PROTOCOL:imaps}
+    properties:
+      mail:
+        imaps:
+          timeout: 10000
+          connectiontimeout: 10000
+        smtp:
+          auth: true
+          starttls:
+            enable: true
+          timeout: 10000
+
+  # Database Configuration
+  datasource:
+    url: jdbc:h2:mem:procurementdb
+    driver-class-name: org.h2.Driver
+    username: sa
+    password:
+
+  h2:
+    console:
+      enabled: true
+      path: /h2-console
+
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+    show-sql: true
+    properties:
+      hibernate:
+        format_sql: true
+
+# Keycloak Configuration
+keycloak:
+  auth-server-url: ${KEYCLOAK_URL:http://localhost:8080}
+  realm: ${KEYCLOAK_REALM:procurement}
+  resource: procurement-service
+  credentials:
+    secret: ${KEYCLOAK_CLIENT_SECRET:}
+  ssl-required: external
+  public-client: false
+
+# Gemini API Configuration
+gemini:
+  api:
+    url: ${GEMINI_API_URL:https://generativelanguage.googleapis.com/v1beta}
+    key: ${GEMINI_API_KEY:}
+    timeout: 10000
+    max-retries: 3
+
+# Email Polling Configuration
+email:
+  polling:
+    interval: 60000
+    max-messages-per-poll: 10
+
+# Logging Configuration
+logging:
+  level:
+    root: INFO
+    com.procurement.email: DEBUG
+    org.springframework.integration: DEBUG
+    org.springframework.mail: DEBUG
+    org.keycloak: INFO
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} - %msg%n"
+    file: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"

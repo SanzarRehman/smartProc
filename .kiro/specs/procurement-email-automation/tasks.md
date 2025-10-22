@@ -1,0 +1,210 @@
+# Implementation Plan
+
+- [x] 1. Set up Spring Boot project structure and dependencies
+  - Create Maven project with Spring Boot 3.x parent
+  - Add dependencies: Spring Integration Mail, Spring Data JPA, H2, Spring Web, Keycloak adapter, Lombok
+  - Configure application.yml with placeholder properties for email, Keycloak, and Gemini API
+  - Create package structure: config, service, model, repository, integration
+  - _Requirements: 1.1, 1.2, 1.3_
+
+- [x] 2. Implement core data models and repositories
+  - [x] 2.1 Create domain entities
+    - Write EmailMessage, ProcurementRequest, UserContext POJOs
+    - Write PurchaseOrder entity with JPA annotations
+    - Write GeneralLedgerEntry entity with JPA annotations
+    - Write EmailProcessingState entity for workflow tracking
+    - _Requirements: 1.3, 6.3, 7.2, 8.2_
+  - [x] 2.2 Create JPA repositories
+    - Write PurchaseOrderRepository interface
+    - Write GeneralLedgerEntryRepository interface
+    - Write EmailProcessingStateRepository interface
+    - _Requirements: 6.4, 7.5, 8.5_
+
+- [x] 3. Implement Gemini AI integration service
+  - [x] 3.1 Create GeminiAIService
+    - Write RestTemplate configuration for Gemini API
+    - Implement isProcurementRelated() method to classify emails
+    - Implement extractRequestDetails() method to parse email content
+    - Implement recommendItems() method with role, designation, and preference analysis
+    - Add retry logic with 3 attempts and exponential backoff
+    - _Requirements: 2.1, 2.2, 2.3, 2.5, 3.4, 4.2, 10.2_
+  - [x] 3.2 Create request/response DTOs for Gemini API
+    - Write GeminiClassificationRequest and Response classes
+    - Write GeminiExtractionRequest and Response classes
+    - Write GeminiRecommendationRequest and Response classes
+    - _Requirements: 2.1, 2.3_
+  - [ ]* 3.3 Write unit tests for GeminiAIService
+    - Test email classification with mock responses
+    - Test request extraction logic
+    - Test recommendation algorithm with different user contexts
+    - Test retry logic on API failures
+    - _Requirements: 2.1, 2.2, 2.3, 10.2_
+
+- [x] 4. Implement Keycloak integration service
+  - [x] 4.1 Create KeycloakIntegrationService
+    - Configure Keycloak Admin Client with OAuth2 credentials
+    - Implement getUserByEmail() method to query user by email
+    - Extract role, designation, and preferences from Keycloak user attributes
+    - Add caching for user context (5-minute TTL)
+    - Handle user not found scenario
+    - _Requirements: 3.1, 3.2, 3.3, 3.4_
+  - [ ]* 4.2 Write unit tests for KeycloakIntegrationService
+    - Test user retrieval with mock Keycloak client
+    - Test user not found handling
+    - Test caching behavior
+    - _Requirements: 3.1, 3.2, 3.3_
+
+- [x] 5. Implement dummy inventory service
+  - [x] 5.1 Create InventoryService with mock data
+    - Create Item POJO with specifications and book value
+    - Implement searchAvailableItems() with hardcoded mock data
+    - Add laptop inventory: Dell XPS 15, MacBook Pro, ThinkPad X1
+    - Add monitor inventory: Dell UltraSharp, LG 4K, Samsung Curved
+    - Add accessories inventory: keyboards, mice, headsets
+    - Return matching items based on item type
+    - _Requirements: 4.1, 4.5_
+  - [ ]* 5.2 Write unit tests for InventoryService
+    - Test item search by type
+    - Test empty results scenario
+    - _Requirements: 4.1_
+
+- [x] 6. Implement procurement agent service
+  - [x] 6.1 Create ProcurementAgentService
+    - Implement generatePurchaseOrder() method
+    - Generate unique PO numbers using UUID or timestamp-based format
+    - Populate PO with item details, requester info, and timestamp
+    - Save PO to database using PurchaseOrderRepository
+    - Return created PurchaseOrder object
+    - _Requirements: 6.1, 6.2, 6.3, 6.4_
+  - [ ]* 6.2 Write unit tests for ProcurementAgentService
+    - Test PO generation with valid request
+    - Test unique PO number generation
+    - Test database persistence
+    - _Requirements: 6.2, 6.3, 6.4_
+
+- [x] 7. Implement accounting agent service
+  - [x] 7.1 Create AccountingAgentService
+    - Implement recordInventoryAllocation() method
+    - Create GL entry with debit to Fixed Assets and credit to Inventory
+    - Implement recordPurchaseTransaction() method
+    - Create GL entry with debit to Fixed Assets and credit to Accounts Payable
+    - Save GL entries to database with timestamps
+    - _Requirements: 7.1, 7.2, 7.3, 7.4, 7.5, 8.1, 8.2, 8.3, 8.4, 8.5_
+  - [ ]* 7.2 Write unit tests for AccountingAgentService
+    - Test inventory allocation GL entry creation
+    - Test purchase transaction GL entry creation
+    - Test database persistence
+    - _Requirements: 7.1, 7.2, 8.1, 8.2_
+
+- [x] 8. Implement email sender service
+  - [x] 8.1 Create EmailSenderService
+    - Configure JavaMailSender with Spring Mail
+    - Implement sendRecommendationEmail() with item list formatting
+    - Implement sendConfirmationEmail() with PO details
+    - Implement sendErrorEmail() for error notifications
+    - Add retry logic for email delivery failures (3 attempts)
+    - _Requirements: 5.1, 5.2, 5.3, 9.1, 9.2, 9.3, 9.5_
+  - [x] 8.2 Create email templates
+    - Create recommendation email template with item table
+    - Create confirmation email template with PO number and timeline
+    - Create error email template
+    - Create user registration request template
+    - _Requirements: 5.2, 5.3, 9.2, 3.3_
+  - [ ]* 8.3 Write unit tests for EmailSenderService
+    - Test email formatting
+    - Test retry logic
+    - _Requirements: 5.1, 9.1, 9.5_
+
+- [x] 9. Implement Spring Integration email polling flow
+  - [x] 9.1 Create EmailPollerConfig
+    - Configure IMAP mail receiver with connection properties
+    - Set up inbound channel adapter with 60-second polling interval
+    - Configure message converter to EmailMessage POJO
+    - Mark emails as read after processing
+    - Add error handling for connection failures
+    - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 10.1_
+  - [x] 9.2 Create message channels
+    - Define incomingEmailChannel for new emails
+    - Define classificationChannel for AI processing
+    - Define procurementChannel for procurement flow
+    - Define confirmationChannel for confirmation emails
+    - _Requirements: 1.1, 1.2_
+  - [ ]* 9.3 Write integration tests for email polling
+    - Test email polling with test mail server
+    - Test message conversion
+    - Test duplicate prevention
+    - _Requirements: 1.1, 1.2, 1.3_
+
+- [x] 10. Implement email processing orchestration service
+  - [x] 10.1 Create EmailProcessingService
+    - Implement processIncomingEmail() method as entry point
+    - Call GeminiAIService to classify email
+    - If not procurement-related, mark as processed and exit
+    - If procurement-related, extract request details
+    - Call KeycloakIntegrationService to get user context
+    - If user not found, send registration email and exit
+    - Call InventoryService to get available items
+    - Call GeminiAIService to recommend items
+    - Call EmailSenderService to send recommendations
+    - Save EmailProcessingState to database
+    - _Requirements: 2.1, 2.2, 2.3, 2.4, 3.1, 3.3, 4.1, 4.2, 4.3, 5.1, 5.2, 5.3_
+  - [x] 10.2 Implement confirmation processing
+    - Implement processConfirmationEmail() method
+    - Parse confirmation response from email body
+    - Retrieve EmailProcessingState from database
+    - If item from inventory, call AccountingAgentService.recordInventoryAllocation()
+    - If new purchase, call ProcurementAgentService.generatePurchaseOrder()
+    - Call AccountingAgentService.recordPurchaseTransaction()
+    - Call EmailSenderService.sendConfirmationEmail()
+    - Update EmailProcessingState to completed
+    - _Requirements: 5.4, 6.1, 6.5, 7.1, 8.1, 9.1, 9.2, 9.4_
+  - [x] 10.3 Add comprehensive error handling
+    - Wrap all service calls in try-catch blocks
+    - Log errors with full context
+    - Handle AIAnalysisException with retry logic
+    - Handle UserNotFoundException with registration email
+    - Handle InventoryServiceException by assuming zero inventory
+    - Handle email sending failures with retry queue
+    - _Requirements: 10.1, 10.2, 10.3, 10.4, 10.5_
+  - [ ]* 10.4 Write integration tests for orchestration
+    - Test complete workflow from email to confirmation
+    - Test inventory allocation flow
+    - Test new purchase flow
+    - Test error scenarios
+    - _Requirements: 2.1, 2.2, 3.1, 4.1, 5.1, 6.1, 7.1, 8.1, 9.1_
+
+- [x] 11. Wire Spring Integration flow with orchestration service
+  - [x] 11.1 Create integration flow configuration
+    - Configure service activator for incomingEmailChannel to call EmailProcessingService.processIncomingEmail()
+    - Configure service activator for confirmationChannel to call EmailProcessingService.processConfirmationEmail()
+    - Add message router to distinguish between new requests and confirmations
+    - Configure error channel for failed messages
+    - Add logging interceptors for debugging
+    - _Requirements: 1.1, 1.2, 2.1, 5.4_
+  - [ ]* 11.2 Write end-to-end integration tests
+    - Test complete flow with test email server
+    - Send test procurement email and verify response
+    - Send confirmation email and verify PO generation
+    - Verify database state after workflow
+    - Test error recovery
+    - _Requirements: 1.1, 2.1, 3.1, 4.1, 5.1, 6.1, 7.1, 8.1, 9.1_
+
+- [x] 12. Create application configuration and startup
+  - [x] 12.1 Configure application properties
+    - Set up email connection properties with environment variable placeholders
+    - Configure Keycloak connection properties
+    - Configure Gemini API properties
+    - Set up H2 database configuration
+    - Configure logging levels
+    - _Requirements: 1.1, 1.4, 3.1, 10.1_
+  - [x] 12.2 Create main application class
+    - Write Spring Boot main class with @SpringBootApplication
+    - Enable Spring Integration with @EnableIntegration
+    - Add startup logging to verify configuration
+    - _Requirements: 1.1_
+  - [x] 12.3 Create README with setup instructions
+    - Document required environment variables
+    - Provide sample configuration values
+    - Include build and run instructions
+    - Document API endpoints for testing
+    - _Requirements: 1.1_
