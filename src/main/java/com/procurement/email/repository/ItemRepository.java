@@ -35,4 +35,9 @@ public interface ItemRepository extends JpaRepository<Item, String> {
      * Search items by name containing keyword.
      */
     List<Item> findByNameContainingIgnoreCase(String keyword);
+
+    /**
+     * Find all items with available quantity greater than the provided threshold.
+     */
+    List<Item> findByAvailableQuantityGreaterThan(int quantity);
 }

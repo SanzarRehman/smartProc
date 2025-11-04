@@ -4,6 +4,7 @@ import lombok.Data;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.Map;
+import java.util.List;
 
 /**
  * POJO representing a procurement request extracted from an email.
@@ -19,4 +20,5 @@ public class ProcurementRequest {
     private BigDecimal estimatedPrice;  // Estimated unit price
     private String additionalNotes;
     private LocalDateTime requestDate;
+    private List<String> candidateItemIds;
 }

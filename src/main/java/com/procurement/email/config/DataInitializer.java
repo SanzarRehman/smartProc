@@ -2,6 +2,7 @@ package com.procurement.email.config;
 
 import com.procurement.email.model.Item;
 import com.procurement.email.repository.ItemRepository;
+import com.procurement.email.service.InventoryVectorService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.CommandLineRunner;
@@ -13,6 +14,7 @@ import java.util.Map;
 
 /**
  * Initializes the database with dummy inventory data on application startup.
+ * Also populates the Qdrant vector database with inventory items.
  * Only runs if the inventory table is empty.
  */
 @Component
@@ -21,16 +23,36 @@ import java.util.Map;
 public class DataInitializer implements CommandLineRunner {
 
     private final ItemRepository itemRepository;
+    private final InventoryVectorService inventoryVectorService;
 
     @Override
     public void run(String... args) {
+        // Clear Qdrant collection first to avoid duplicates
+        log.info("Clearing Qdrant vector database to avoid duplicates...");
+        try {
+            inventoryVectorService.reindexAllItems();
+            log.info("Qdrant vector database cleared");
+        } catch (Exception e) {
+            log.warn("Could not clear Qdrant collection (may not exist yet): {}", e.getMessage());
+        }
+        
         // Only initialize if inventory is empty
         if (itemRepository.count() == 0) {
             log.info("Inventory table is empty. Initializing with dummy data...");
             initializeInventory();
             log.info("Inventory initialization complete. Total items: {}", itemRepository.count());
         } else {
-            log.info("Inventory table already contains {} items. Skipping initialization.", itemRepository.count());
+            log.info("Inventory table already contains {} items. Skipping SQL initialization.", itemRepository.count());
+        }
+        
+        // Always reindex all items in Qdrant to ensure fresh data
+        log.info("Indexing all inventory items in Qdrant vector database...");
+        try {
+            inventoryVectorService.indexAllItems();
+            log.info("Qdrant indexing complete");
+        } catch (Exception e) {
+            log.error("Error indexing items in Qdrant: {}", e.getMessage(), e);
+            log.warn("Application will continue but vector search may not work properly");
         }
     }
 

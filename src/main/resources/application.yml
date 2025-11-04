@@ -71,6 +71,25 @@ email:
     interval: 60000
     max-messages-per-poll: 10
 
+# Qdrant Vector Database Configuration
+qdrant:
+  host: ${QDRANT_HOST:localhost}
+  port: ${QDRANT_PORT:6334}
+  use-tls: ${QDRANT_USE_TLS:false}
+  collection:
+    name: ${QDRANT_COLLECTION_NAME:inventory_items}
+  vector:
+    size: ${QDRANT_VECTOR_SIZE:384}
+
+# Embedding Model Configuration
+embedding:
+  model:
+    url: ${EMBEDDING_MODEL_URL:https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/model.onnx}
+  tokenizer:
+    url: ${EMBEDDING_TOKENIZER_URL:https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json}
+  cache:
+    dir: ${EMBEDDING_CACHE_DIR:${java.io.tmpdir}/embedding-models}
+
 # Logging Configuration
 logging:
   level:

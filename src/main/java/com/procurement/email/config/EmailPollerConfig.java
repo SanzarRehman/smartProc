@@ -134,24 +134,16 @@ public class EmailPollerConfig {
      * Configure IMAP mail receiver using the Java Mail Session.
      * This approach uses Spring Boot's official mail configuration.
      */
+
     @Bean
     public ImapMailReceiver imapMailReceiver(Session javaMailSession) {
-        log.info("========== CREATING IMAP MAIL RECEIVER ==========");
-        
-        // Use simple URL without credentials - Session handles authentication
         String url = String.format("%s://%s/INBOX", mailProtocol, mailHost);
-        log.info("IMAP URL: {}", url);
-        
         ImapMailReceiver receiver = new ImapMailReceiver(url);
-        receiver.setSession(javaMailSession);  // Use the authenticated session
+        receiver.setSession(javaMailSession);
         receiver.setShouldMarkMessagesAsRead(true);
         receiver.setShouldDeleteMessages(false);
-        receiver.setMaxFetchSize(maxMessagesPerPoll);
-        
-        // Use simple content to avoid FolderClosedException
-        receiver.setSimpleContent(true);  // Eagerly fetch content before folder closes
-        
-        log.info("IMAP Mail Receiver configured successfully");
+        receiver.setSimpleContent(true);
+        receiver.setAutoCloseFolder(true); // Keep folder open for IDLE
         return receiver;
     }
 
@@ -160,7 +152,7 @@ public class EmailPollerConfig {
      */
     @Bean
     @InboundChannelAdapter(channel = "incomingEmailChannel", 
-                          poller = @Poller(fixedDelay = "${email.polling.interval:60000}"))
+                          poller = @Poller(fixedDelay = "1000"))
     public MessageSource<EmailMessage> mailMessageSource(ImapMailReceiver imapMailReceiver) {
         return () -> {
             try {

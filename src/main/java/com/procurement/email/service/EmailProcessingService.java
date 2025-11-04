@@ -2,6 +2,10 @@ package com.procurement.email.service;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.procurement.email.integration.dto.GeminiConfirmationRequest;
+import com.procurement.email.integration.dto.GeminiConfirmationResponse;
+import com.procurement.email.integration.dto.GeminiEmailIntentResponse;
+import com.procurement.email.integration.dto.GeminiInventoryMatchResponse;
 import com.procurement.email.model.*;
 import com.procurement.email.repository.EmailProcessingStateRepository;
 import com.procurement.email.service.GeminiAIService.AIAnalysisException;
@@ -26,6 +30,7 @@ public class EmailProcessingService {
     private final GeminiAIService geminiAIService;
     private final KeycloakIntegrationService keycloakIntegrationService;
     private final InventoryService inventoryService;
+    private final InventoryVectorService inventoryVectorService;
     private final EmailSenderService emailSenderService;
     private final ProcurementAgentService procurementAgentService;
     private final AccountingAgentService accountingAgentService;
@@ -57,79 +62,110 @@ public class EmailProcessingService {
         log.info("Processing incoming email from: {}, subject: {}", email.getFrom(), email.getSubject());
 
         EmailProcessingState state = null;
-        
+
         try {
-            // Create initial processing state
-            state = createInitialState(email);
-            
-            // Step 1: Classify email using Gemini AI
-            log.debug("Step 1: Classifying email with AI");
-            boolean isProcurementRelated = classifyEmail(email);
-            
-            if (!isProcurementRelated) {
-                log.info("Email is not procurement-related. Marking as processed.");
-                updateState(state, STATE_NOT_PROCUREMENT, null);
+            Optional<UserContext> userContextOpt = getUserContext(email.getFrom());
+            if (userContextOpt.isEmpty()) {
+                log.warn("Unauthorized procurement attempt from: {}", email.getFrom());
+                emailSenderService.sendErrorEmail(email.getFrom(),
+                        "We couldn't find your account in the procurement system. Please register before submitting requests.");
                 return;
             }
-            
+
+            UserContext userContext = userContextOpt.get();
+
+            GeminiEmailIntentResponse intent = geminiAIService.analyzeEmailIntent(email);
+
+            if (!intent.isProcurementRelated()) {
+                log.info("Email is not procurement-related. Ignoring message {}.", email.getMessageId());
+                return;
+            }
+
+            if (intent.getIntentType() == GeminiEmailIntentResponse.IntentType.REPLY_CONFIRMATION) {
+                log.debug("Detected confirmation reply. Delegating to confirmation workflow for message {}", email.getMessageId());
+                processConfirmationEmail(email);
+                return;
+            }
+
+            if (intent.getIntentType() == GeminiEmailIntentResponse.IntentType.REPLY_INFORMATION) {
+                log.info("Reply {} contains additional details; continuing through intake flow instead of confirmation handling.", email.getMessageId());
+            } else if (intent.isReply()) {
+                log.debug("Detected reply without new details. Delegating to confirmation workflow for message {}", email.getMessageId());
+                processConfirmationEmail(email);
+                return;
+            }
+
+            if (!intent.isHasAllDetails() || intent.getIntentType() == GeminiEmailIntentResponse.IntentType.NEW_REQUEST_MISSING_DETAILS) {
+                log.warn("New procurement email missing critical details. Requesting additional information.");
+                List<String> missing = intent.getMissingDetails();
+                if (missing == null || missing.isEmpty()) {
+                    missing = List.of("Item Type", "Quantity");
+                }
+                emailSenderService.sendTemplateGuideEmail(email.getFrom(), missing, email.getMessageId(), email.getSubject());
+                return;
+            }
+
+            state = createInitialState(email);
             updateState(state, STATE_CLASSIFIED, null);
-            
-            // Step 2: Validate email format against template
-            log.debug("Step 2: Validating email format against procurement template");
-            // For validation and extraction, use cleaned email body (without quoted replies)
+
             EmailMessage cleanedEmail = createCleanedEmailCopy(email);
-            TemplateValidationResult validationResult = validateEmailTemplate(cleanedEmail);
-            
+            TemplateValidationResult validationResult = validateProcurementOrFallback(cleanedEmail, email);
             if (!validationResult.isValid()) {
-                log.warn("Email does not match procurement template. Sending template guide.");
-                emailSenderService.sendTemplateGuideEmail(email.getFrom(), validationResult.getMissingFields(), 
-                        email.getMessageId(), email.getSubject());
                 updateState(state, "TEMPLATE_INVALID", null);
                 return;
             }
-            
-            // Step 3: Extract request details
-            log.debug("Step 3: Extracting procurement request details");
+
+            log.debug("Extracting procurement request details");
             ProcurementRequest request = extractRequestDetails(cleanedEmail);
-            state.setProcurementRequestId(request.getRequestId());
-            updateState(state, STATE_CLASSIFIED, request);
-            
-            // Step 3: Get user context from Keycloak
-            log.debug("Step 3: Retrieving user context from Keycloak");
-            Optional<UserContext> userContextOpt = getUserContext(email.getFrom());
-            
-            if (userContextOpt.isEmpty()) {
-                log.warn("User not found in Keycloak: {}", email.getFrom());
-                sendRegistrationEmail(email.getFrom());
-                updateState(state, STATE_USER_NOT_FOUND, null);
-                return;
-            }
-            
-            UserContext userContext = userContextOpt.get();
-            updateState(state, STATE_CONTEXT_GATHERED, request);
-            
-            // Step 4: Check inventory for available items
-            log.debug("Step 4: Checking inventory for available items");
-            List<Item> availableItems = checkInventory(request);
-            updateState(state, STATE_INVENTORY_CHECKED, request);
-            
-            // Step 5: Get AI recommendations (always, even if inventory is empty)
-            log.debug("Step 5: Getting AI recommendations for items");
-            List<Item> recommendedItems = getRecommendations(request, userContext, availableItems);
-            
-            // Step 6: Send recommendation email with available options
-            log.debug("Step 6: Sending recommendation email");
-            if (!availableItems.isEmpty()) {
-                // We have inventory items - send them for user to choose
-                sendRecommendations(email.getFrom(), recommendedItems, request, email.getMessageId(), email.getSubject());
+
+            log.debug("Loading available inventory for Gemini matching");
+            List<Item> allInventory = inventoryService.listAllAvailableItems();
+            GeminiInventoryMatchResponse matchResponse = geminiAIService.matchInventoryItems(request, allInventory);
+            List<Item> matchedItems = inventoryService.getItemsByIds(matchResponse.getMatchingItemIds());
+
+            if (!matchedItems.isEmpty()) {
+                request.setCandidateItemIds(matchResponse.getMatchingItemIds());
+                log.info("Gemini identified {} candidate inventory items", matchedItems.size());
             } else {
-                // No inventory - will need to purchase new, but still ask for confirmation
+                request.setCandidateItemIds(Collections.emptyList());
+                log.info("Gemini did not find matching inventory items: {}", matchResponse.getReasoning());
+            }
+            state.setProcurementRequestId(request.getRequestId());
+            updateState(state, STATE_CONTEXT_GATHERED, request);
+
+            List<Item> availableItems;
+            if (!matchedItems.isEmpty()) {
+                availableItems = matchedItems;
+            } else {
+                log.debug("Checking inventory for available items via fallback search");
+                availableItems = checkInventory(request);
+            }
+            updateState(state, STATE_INVENTORY_CHECKED, request);
+
+            List<Item> itemsToRecommend = availableItems;
+            if (!availableItems.isEmpty()) {
+                log.debug("Requesting Gemini recommendations with matched inventory context");
+                List<Item> recommendedItems = getRecommendations(request, userContext, availableItems);
+                if (!recommendedItems.isEmpty()) {
+                    itemsToRecommend = recommendedItems;
+                } else {
+                    log.debug("Gemini returned no ranked recommendations; defaulting to matched inventory list.");
+                }
+            }
+
+            // Use vector search to find similar products based on the request
+            log.debug("Searching for similar products using vector database");
+            Map<String, Float> similarProductsWithScores = getSimilarProducts(request);
+            
+            if (!availableItems.isEmpty()) {
+                sendRecommendations(email.getFrom(), itemsToRecommend, similarProductsWithScores, request, email.getMessageId(), email.getSubject());
+            } else {
                 sendNewPurchaseConfirmation(email.getFrom(), request, email.getMessageId(), email.getSubject());
             }
             updateState(state, STATE_RECOMMENDATIONS_SENT, request);
-            
+
             log.info("Successfully processed incoming email. State: {}", state.getCurrentState());
-            
+
         } catch (AIAnalysisException e) {
             log.error("AI analysis failed for email: {}", email.getMessageId(), e);
             handleAIAnalysisError(email, state, e);
@@ -158,13 +194,9 @@ public class EmailProcessingService {
         EmailProcessingState state = null;
         
         try {
-            // Parse confirmation response from email body
-            log.debug("Step 1: Parsing confirmation response");
-            ConfirmationResponse confirmation = parseConfirmationResponse(email);
-            
             // Retrieve processing state from database
-            log.debug("Step 2: Retrieving processing state");
-            state = retrieveProcessingState(email, confirmation);
+            log.debug("Step 1: Retrieving processing state");
+            state = retrieveProcessingState(email);
             
             if (state == null) {
                 log.warn("No processing state found for confirmation email from: {}", email.getFrom());
@@ -183,11 +215,39 @@ public class EmailProcessingService {
                 return;
             }
             
-            updateState(state, STATE_CONFIRMATION_RECEIVED, null);
-            
+            Optional<UserContext> userContextOpt = getUserContext(email.getFrom());
+            if (userContextOpt.isEmpty()) {
+                log.warn("Confirmation received from unauthorized user: {}", email.getFrom());
+                emailSenderService.sendErrorEmail(email.getFrom(),
+                        "We couldn't find your account in the procurement system. Please register before confirming requests.");
+                updateState(state, STATE_USER_NOT_FOUND, null);
+                return;
+            }
+
+            UserContext userContext = userContextOpt.get();
+
             // Retrieve the original procurement request data
             ProcurementRequest request = extractRequestFromState(state);
-            UserContext userContext = getUserContext(email.getFrom()).orElseThrow();
+            List<Item> candidateItems = prepareCandidateItemsForConfirmation(request);
+
+            // Parse confirmation response using Gemini
+            log.debug("Step 2: Parsing confirmation response with Gemini");
+            ConfirmationResponse confirmation = parseConfirmationResponse(email, request, candidateItems);
+
+            updateState(state, STATE_CONFIRMATION_RECEIVED, null);
+
+            if (!confirmation.isConfirmed() && isExplicitNewPurchase(confirmation.getUserReply())) {
+                log.info("Confirmation email {} requested new purchase instead of inventory allocation.", email.getMessageId());
+                confirmation.setConfirmed(true);
+                confirmation.setFromInventory(false);
+            }
+
+                if (!confirmation.isConfirmed()) {
+                    log.info("Confirmation email {} did not include approval. Requesting clarification.", email.getMessageId());
+                    emailSenderService.sendErrorEmail(email.getFrom(),
+                            "We couldn't determine your approval. Please reply with the Item ID or name you would like to proceed with, or say 'Confirm new purchase'.");
+                    return;
+                }
             
             PurchaseOrder purchaseOrder;
             
@@ -202,6 +262,7 @@ public class EmailProcessingService {
                 }
                 
                 log.info("Processing inventory allocation for item: {} ({})", selectedItem.getName(), selectedItem.getId());
+                inventoryService.decrementItemQuantity(selectedItem.getId(), request.getQuantity());
                 
                 // Record inventory allocation in accounting
                 accountingAgentService.recordInventoryAllocation(selectedItem, userContext);
@@ -284,6 +345,16 @@ public class EmailProcessingService {
             return new TemplateValidationResult(true, Collections.emptyList()); // Allow to proceed
         }
     }
+
+    private TemplateValidationResult validateProcurementOrFallback(EmailMessage cleanedEmail, EmailMessage originalEmail) {
+        TemplateValidationResult validationResult = validateEmailTemplate(cleanedEmail);
+        if (!validationResult.isValid()) {
+            log.warn("Email missing required fields. Prompting user for additional details.");
+            emailSenderService.sendTemplateGuideEmail(originalEmail.getFrom(), validationResult.getMissingFields(),
+                    originalEmail.getMessageId(), originalEmail.getSubject());
+        }
+        return validationResult;
+    }
     
     /**
      * Public static class for template validation result.
@@ -334,6 +405,23 @@ public class EmailProcessingService {
         return false;
     }
 
+    private boolean isExplicitNewPurchase(String reply) {
+        if (reply == null || reply.isBlank()) {
+            return false;
+        }
+
+        String normalized = reply.toLowerCase(Locale.ROOT);
+        return normalized.contains("new purchase")
+                || normalized.contains("purchase new")
+                || normalized.contains("order new")
+                || normalized.contains("buy new")
+                || normalized.contains("none of these")
+                || (normalized.contains("none") && normalized.contains("inventory"))
+                || normalized.contains("proceed with new")
+                || normalized.contains("no inventory")
+                || normalized.contains("please purchase");
+    }
+
     /**
      * Extracts request details from email.
      */
@@ -382,11 +470,54 @@ public class EmailProcessingService {
     }
 
     /**
-     * Sends recommendation email to requester with inventory items.
+     * Gets similar products using vector database semantic search.
+     * Builds a search query from the request details and finds similar items.
      */
-    private void sendRecommendations(String email, List<Item> recommendations, ProcurementRequest request, 
-                                     String inReplyToMessageId, String originalSubject) {
-        emailSenderService.sendRecommendationEmail(email, recommendations, request, inReplyToMessageId, originalSubject);
+    private Map<String, Float> getSimilarProducts(ProcurementRequest request) {
+        try {
+            // Build a comprehensive search query from the request
+            StringBuilder searchQuery = new StringBuilder();
+            
+            // Add item name or type
+            if (request.getItemName() != null && !request.getItemName().isEmpty()) {
+                searchQuery.append(request.getItemName());
+            } else if (request.getItemType() != null) {
+                searchQuery.append(request.getItemType());
+            }
+            
+            // Add specifications to enrich the search
+            if (request.getSpecifications() != null && !request.getSpecifications().isEmpty()) {
+                for (Map.Entry<String, String> spec : request.getSpecifications().entrySet()) {
+                    searchQuery.append(" ").append(spec.getValue());
+                }
+            }
+            
+            // Add additional notes if available
+            if (request.getAdditionalNotes() != null && !request.getAdditionalNotes().isEmpty()) {
+                searchQuery.append(" ").append(request.getAdditionalNotes());
+            }
+            
+            String query = searchQuery.toString().trim();
+            log.info("Searching for similar products with query: {}", query);
+            
+            // Search for similar items with scores (limit to top 5)
+            Map<String, Float> similarItems = inventoryVectorService.searchSimilarItemsByTextWithScores(query, 5);
+            
+            log.info("Found {} similar products with scores", similarItems.size());
+            return similarItems;
+            
+        } catch (Exception e) {
+            log.warn("Failed to get similar products from vector search: {}", e.getMessage(), e);
+            return Collections.emptyMap();
+        }
+    }
+
+    /**
+     * Sends recommendation email to requester with inventory items and similar products.
+     */
+    private void sendRecommendations(String email, List<Item> recommendations, Map<String, Float> similarProducts,
+                                     ProcurementRequest request, String inReplyToMessageId, String originalSubject) {
+        emailSenderService.sendRecommendationEmail(email, recommendations, similarProducts, request, inReplyToMessageId, originalSubject);
     }
     
     /**
@@ -402,145 +533,78 @@ public class EmailProcessingService {
      * Extracts the selected item ID and fetches the full item details from inventory.
      * Supports multiple formats: Item ID (LAP-001), Item Name (MacBook Pro), or Option number (Option 1).
      */
-    private ConfirmationResponse parseConfirmationResponse(EmailMessage email) {
-        // Extract only the user's reply, not the quoted email chain
-        String body = extractUserReply(email.getBody());
-        String bodyLower = body.toLowerCase();
-        
+    private ConfirmationResponse parseConfirmationResponse(EmailMessage email, ProcurementRequest request, List<Item> candidateItems) {
         ConfirmationResponse response = new ConfirmationResponse();
-        response.setConfirmed(true);
-        
-        // Simple parsing logic for POC
-        if (bodyLower.contains("confirm") || bodyLower.contains("yes") || bodyLower.contains("approve")) {
-            response.setConfirmed(true);
-        }
-        
-        Item selectedItem = null;
-        
-        // Strategy 1: Look for item ID patterns like "lap-001", "mon-002", "acc-003"
-        java.util.regex.Pattern idPattern = java.util.regex.Pattern.compile("(lap-\\d+|mon-\\d+|acc-\\d+)", 
-                                                                            java.util.regex.Pattern.CASE_INSENSITIVE);
-        java.util.regex.Matcher idMatcher = idPattern.matcher(body);
-        
-        if (idMatcher.find()) {
-            String itemId = idMatcher.group(1).toUpperCase();
-            selectedItem = inventoryService.getItemById(itemId);
-            if (selectedItem != null) {
-                log.info("Found item by ID: {} -> {}", itemId, selectedItem.getName());
-            }
-        }
-        
-        // Strategy 2: Look for "Option X" pattern and extract item ID from the full email body
-        if (selectedItem == null) {
-            java.util.regex.Pattern optionPattern = java.util.regex.Pattern.compile("option\\s+(\\d+)", 
-                                                                                    java.util.regex.Pattern.CASE_INSENSITIVE);
-            java.util.regex.Matcher optionMatcher = optionPattern.matcher(body);
-            
-            if (optionMatcher.find()) {
-                int optionNumber = Integer.parseInt(optionMatcher.group(1));
-                log.info("User selected Option {}, searching in full email for corresponding item ID", optionNumber);
-                
-                // Look in the FULL email body (including quoted text) to find the item ID for this option
-                String fullBody = email.getBody();
-                
-                // Find all "Option X:" headers in the email
-                java.util.regex.Pattern optionHeaderPattern = java.util.regex.Pattern.compile(
-                    "Option\\s+(\\d+):\\s+([^<\\n]+)", 
-                    java.util.regex.Pattern.CASE_INSENSITIVE);
-                java.util.regex.Matcher headerMatcher = optionHeaderPattern.matcher(fullBody);
-                
-                int currentOption = 0;
-                while (headerMatcher.find()) {
-                    currentOption++;
-                    if (currentOption == optionNumber) {
-                        String itemName = headerMatcher.group(2).trim();
-                        log.info("Found Option {} in email: {}", optionNumber, itemName);
-                        
-                        // Now find the Item ID for this option in the quoted email
-                        // Look for "Item ID: XXX-###" after this option header
-                        int startPos = headerMatcher.end();
-                        int endPos = Math.min(startPos + 500, fullBody.length()); // Search next 500 chars
-                        String optionSection = fullBody.substring(startPos, endPos);
-                        
-                        java.util.regex.Pattern itemIdPattern = java.util.regex.Pattern.compile(
-                            "Item ID:\\s*<[^>]*>\\s*([A-Z]+-\\d+)", 
-                            java.util.regex.Pattern.CASE_INSENSITIVE);
-                        java.util.regex.Matcher itemIdMatcher = itemIdPattern.matcher(optionSection);
-                        
-                        if (itemIdMatcher.find()) {
-                            String itemId = itemIdMatcher.group(1).toUpperCase();
-                            selectedItem = inventoryService.getItemById(itemId);
-                            if (selectedItem != null) {
-                                log.info("Found item by option number: Option {} -> {} ({})", 
-                                        optionNumber, selectedItem.getName(), itemId);
-                            }
-                        } else {
-                            // Try without HTML tags
-                            java.util.regex.Pattern simpleIdPattern = java.util.regex.Pattern.compile(
-                                "Item ID:\\s*([A-Z]+-\\d+)", 
-                                java.util.regex.Pattern.CASE_INSENSITIVE);
-                            java.util.regex.Matcher simpleIdMatcher = simpleIdPattern.matcher(optionSection);
-                            if (simpleIdMatcher.find()) {
-                                String itemId = simpleIdMatcher.group(1).toUpperCase();
-                                selectedItem = inventoryService.getItemById(itemId);
-                                if (selectedItem != null) {
-                                    log.info("Found item by option number: Option {} -> {} ({})", 
-                                            optionNumber, selectedItem.getName(), itemId);
-                                }
-                            }
-                        }
-                        break;
-                    }
+
+        // Extract and sanitize the user's reply before sending to Gemini
+        String trimmedReply = extractUserReply(email.getBody());
+        String sanitizedReply = sanitizeReplyForGemini(trimmedReply);
+
+        // Build candidate item payload (limit to small set to avoid large requests)
+        List<GeminiConfirmationRequest.CandidateItem> candidatePayload = new ArrayList<>();
+        if (candidateItems != null && !candidateItems.isEmpty()) {
+            for (Item item : candidateItems) {
+                if (item == null || item.getId() == null || item.getName() == null) {
+                    continue;
                 }
+                candidatePayload.add(GeminiConfirmationRequest.CandidateItem.builder()
+                        .itemId(item.getId())
+                        .itemName(truncate(item.getName(), 80))
+                        .build());
             }
         }
-        
-        // Strategy 3: Look for item names in the user's reply
-        if (selectedItem == null) {
-            // Check for laptops
-            if (bodyLower.contains("macbook")) {
-                selectedItem = inventoryService.getItemById("LAP-002");
-                log.info("Found MacBook by name match");
-            } else if (bodyLower.contains("dell") && (bodyLower.contains("xps") || bodyLower.contains("laptop"))) {
-                selectedItem = inventoryService.getItemById("LAP-001");
-                log.info("Found Dell XPS by name match");
-            } else if (bodyLower.contains("thinkpad")) {
-                selectedItem = inventoryService.getItemById("LAP-003");
-                log.info("Found ThinkPad by name match");
+
+        GeminiConfirmationRequest confirmationRequest = GeminiConfirmationRequest.builder()
+                .senderEmail(email.getFrom())
+                .emailSubject(email.getSubject())
+                .emailBody(sanitizedReply)
+                .candidateItems(candidatePayload)
+                .build();
+
+    response.setUserReply(sanitizedReply.toLowerCase(Locale.ROOT));
+
+        GeminiConfirmationResponse aiResponse = geminiAIService.parseConfirmationEmail(confirmationRequest);
+
+        response.setConfirmed(aiResponse.isConfirmed());
+        response.setFromInventory(false);
+
+        List<String> matchedIds = aiResponse.getSelectedItemIds() != null
+                ? aiResponse.getSelectedItemIds()
+                : Collections.emptyList();
+
+        for (String itemId : matchedIds) {
+            if (itemId == null || itemId.isBlank()) {
+                continue;
             }
-            // Check for monitors
-            else if (bodyLower.contains("lg") && bodyLower.contains("4k")) {
-                selectedItem = inventoryService.getItemById("MON-002");
-                log.info("Found LG 4K by name match");
-            } else if (bodyLower.contains("dell") && bodyLower.contains("ultrasharp")) {
-                selectedItem = inventoryService.getItemById("MON-001");
-                log.info("Found Dell UltraSharp by name match");
-            } else if (bodyLower.contains("samsung") && bodyLower.contains("curved")) {
-                selectedItem = inventoryService.getItemById("MON-003");
-                log.info("Found Samsung Curved by name match");
-            }
-            // Check for accessories
-            else if (bodyLower.contains("logitech") && bodyLower.contains("mx keys")) {
-                selectedItem = inventoryService.getItemById("ACC-001");
-                log.info("Found Logitech MX Keys by name match");
-            } else if (bodyLower.contains("logitech") && bodyLower.contains("mx master")) {
-                selectedItem = inventoryService.getItemById("ACC-003");
-                log.info("Found Logitech MX Master by name match");
+            Item selectedItem = inventoryService.getItemById(itemId.trim());
+            if (selectedItem != null) {
+                response.setFromInventory(true);
+                response.setSelectedItem(selectedItem);
+                log.info("Gemini matched confirmation to inventory item: {} ({})",
+                        selectedItem.getName(), selectedItem.getId());
+                break;
             }
         }
-        
-        // Set the response
-        if (selectedItem != null) {
-            response.setFromInventory(true);
-            response.setSelectedItem(selectedItem);
-            log.info("Parsed confirmation: itemId={}, itemName={}, fromInventory=true", 
-                    selectedItem.getId(), selectedItem.getName());
-        } else {
-            response.setFromInventory(false);
-            log.info("Parsed confirmation: no matching item found, fromInventory=false (will create new purchase)");
+
+        if (!response.isFromInventory()) {
+            log.info("Gemini did not return a valid inventory item. Proceeding with new purchase flow.");
         }
-        
+
         return response;
+    }
+
+    private String sanitizeReplyForGemini(String reply) {
+        if (reply == null) {
+            return "";
+        }
+
+        String sanitized = reply.trim();
+        int maxLength = 1800;
+        if (sanitized.length() > maxLength) {
+            sanitized = sanitized.substring(0, maxLength);
+        }
+
+        return sanitized;
     }
 
     /**
@@ -612,7 +676,7 @@ public class EmailProcessingService {
     /**
      * Retrieves processing state for confirmation email.
      */
-    private EmailProcessingState retrieveProcessingState(EmailMessage email, ConfirmationResponse confirmation) {
+    private EmailProcessingState retrieveProcessingState(EmailMessage email) {
         // Try to find by requester email and state
         List<EmailProcessingState> states = emailProcessingStateRepository.findByRequesterEmail(email.getFrom());
         
@@ -620,6 +684,32 @@ public class EmailProcessingService {
                 .filter(s -> STATE_RECOMMENDATIONS_SENT.equals(s.getCurrentState()))
                 .max(Comparator.comparing(EmailProcessingState::getLastUpdated))
                 .orElse(null);
+    }
+
+    private List<Item> prepareCandidateItemsForConfirmation(ProcurementRequest request) {
+        if (request == null) {
+            return Collections.emptyList();
+        }
+
+        List<String> candidateIds = request.getCandidateItemIds();
+        if (candidateIds != null && !candidateIds.isEmpty()) {
+            List<Item> items = inventoryService.getItemsByIds(candidateIds);
+            if (!items.isEmpty()) {
+                return items;
+            }
+        }
+
+        return checkInventory(request);
+    }
+
+    private String truncate(String value, int maxLength) {
+        if (value == null) {
+            return "";
+        }
+        if (value.length() <= maxLength) {
+            return value;
+        }
+        return value.substring(0, maxLength) + "...";
     }
 
     /**
@@ -720,6 +810,7 @@ public class EmailProcessingService {
         private boolean confirmed;
         private boolean fromInventory;
         private Item selectedItem;
+        private String userReply;
 
         public boolean isConfirmed() {
             return confirmed;
@@ -743,6 +834,14 @@ public class EmailProcessingService {
 
         public void setSelectedItem(Item selectedItem) {
             this.selectedItem = selectedItem;
+        }
+
+        public String getUserReply() {
+            return userReply;
+        }
+
+        public void setUserReply(String userReply) {
+            this.userReply = userReply;
         }
     }
 

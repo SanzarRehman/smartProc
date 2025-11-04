@@ -24,6 +24,7 @@ import java.util.Map;
 public class EmailSenderService {
 
     private final JavaMailSender mailSender;
+    private final InventoryService inventoryService;
     private static final int MAX_RETRY_ATTEMPTS = 3;
     private static final long RETRY_DELAY_MS = 2000;
     private static final DateTimeFormatter DATE_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
@@ -33,11 +34,13 @@ public class EmailSenderService {
      *
      * @param to the recipient email address
      * @param recommendations the list of recommended items
+     * @param similarProducts map of item IDs to similarity scores for similar products
      * @param request the original procurement request
      * @param inReplyToMessageId the message ID of the original email (for threading)
      * @param originalSubject the subject of the original email
      */
     public void sendRecommendationEmail(String to, List<Item> recommendations, 
+                                       Map<String, Float> similarProducts,
                                        com.procurement.email.model.ProcurementRequest request,
                                        String inReplyToMessageId, String originalSubject) {
         log.info("Sending recommendation email to: {} (in reply to: {})", to, inReplyToMessageId);
@@ -48,7 +51,7 @@ public class EmailSenderService {
             subject = "Re: " + subject;
         }
         
-        String body = buildRecommendationEmailBody(recommendations, request);
+        String body = buildRecommendationEmailBody(recommendations, similarProducts, request);
         
         sendEmailWithRetry(to, subject, body, inReplyToMessageId);
     }
@@ -290,13 +293,15 @@ public class EmailSenderService {
     }
 
     /**
-     * Builds the HTML body for recommendation email with inventory items.
+     * Builds the HTML body for recommendation email with inventory items and similar products.
      *
      * @param recommendations the list of recommended items
+     * @param similarProducts map of item IDs to similarity scores
      * @param request the original procurement request
      * @return the HTML email body
      */
-    private String buildRecommendationEmailBody(List<Item> recommendations, 
+    private String buildRecommendationEmailBody(List<Item> recommendations,
+                                               Map<String, Float> similarProducts,
                                                com.procurement.email.model.ProcurementRequest request) {
         StringBuilder html = new StringBuilder();
         html.append("<html><body>");
@@ -359,8 +364,79 @@ public class EmailSenderService {
             html.append("<li>The <strong>Item ID</strong> (e.g., \"").append(escapeHtml(recommendations.get(0).getId())).append("\"), OR</li>");
             html.append("<li>The <strong>Item Name</strong> (e.g., \"").append(escapeHtml(recommendations.get(0).getName())).append("\"), OR</li>");
             html.append("<li>Just say \"<strong>Option 1</strong>\" or \"<strong>Confirm first option</strong>\"</li>");
+            html.append("<li>If <strong>none of these work</strong>, reply with \"<strong>Proceed with new purchase</strong>\" or \"<strong>None of these</strong>\" and we'll order it for you.</li>");
             html.append("</ul>");
             html.append("</div>");
+        }
+        
+        // Add similar products section if available
+        if (similarProducts != null && !similarProducts.isEmpty()) {
+            html.append("<hr style='margin: 30px 0; border: none; border-top: 2px solid #e0e0e0;'>");
+            html.append("<h2 style='color: #1976d2;'>💡 You Might Also Like</h2>");
+            html.append("<p>Based on your request, we found these similar products that might interest you:</p>");
+            
+            html.append("<div style='margin: 20px 0;'>");
+            
+            int similarCount = 0;
+            for (Map.Entry<String, Float> entry : similarProducts.entrySet()) {
+                String itemId = entry.getKey();
+                Float score = entry.getValue();
+                
+                // Skip items already in recommendations to avoid duplicates
+                boolean alreadyRecommended = recommendations.stream()
+                        .anyMatch(item -> item.getId().equals(itemId));
+                if (alreadyRecommended) {
+                    continue;
+                }
+                
+                // Fetch item details
+                Item item = inventoryService.getItemById(itemId);
+                if (item == null) {
+                    continue;
+                }
+                
+                similarCount++;
+                int matchPercentage = Math.round(score * 100);
+                
+                html.append("<div style='border: 2px solid #9e9e9e; border-radius: 8px; padding: 15px; margin: 15px 0; background-color: #fafafa;'>");
+                html.append("<h3 style='margin-top: 0; color: #424242;'>");
+                html.append("<span style='background-color: #2196f3; color: white; padding: 3px 8px; border-radius: 4px; font-size: 14px; margin-right: 10px;'>");
+                html.append(matchPercentage).append("% Match</span>");
+                html.append(escapeHtml(item.getName()));
+                html.append("</h3>");
+                
+                html.append("<p style='font-size: 18px; color: #1976d2; margin: 10px 0;'><strong>Price: $").append(formatCurrency(item.getBookValue())).append(" per unit</strong></p>");
+                html.append("<p style='margin: 5px 0;'><strong>Item ID:</strong> ").append(escapeHtml(item.getId())).append("</p>");
+                html.append("<p style='margin: 5px 0;'><strong>Available Quantity:</strong> ").append(item.getAvailableQuantity()).append(" units</p>");
+                
+                if (item.getSpecifications() != null && !item.getSpecifications().isEmpty()) {
+                    html.append("<p style='margin: 10px 0 5px 0;'><strong>Key Features:</strong></p>");
+                    html.append("<ul style='margin: 5px 0;'>");
+                    int specCount = 0;
+                    for (Map.Entry<String, String> spec : item.getSpecifications().entrySet()) {
+                        if (!spec.getKey().equals("subtype") && specCount < 3) { // Limit to 3 specs
+                            html.append("<li><strong>").append(escapeHtml(formatSpecKey(spec.getKey()))).append(":</strong> ")
+                                .append(escapeHtml(spec.getValue())).append("</li>");
+                            specCount++;
+                        }
+                    }
+                    html.append("</ul>");
+                }
+                
+                html.append("<p style='margin: 10px 0; padding: 8px; background-color: #e3f2fd; border-radius: 4px; font-size: 14px;'>");
+                html.append("<strong>💬 Why this suggestion:</strong> This item has a ").append(matchPercentage);
+                html.append("% semantic similarity to your request, making it a relevant alternative.");
+                html.append("</p>");
+                
+                html.append("</div>");
+            }
+            
+            if (similarCount > 0) {
+                html.append("</div>");
+                html.append("<p style='color: #616161; font-size: 14px; font-style: italic;'>");
+                html.append("These suggestions are powered by AI semantic search to help you find the best match for your needs.");
+                html.append("</p>");
+            }
         }
         
         html.append("<p>Best regards,<br>Procurement Automation System</p>");

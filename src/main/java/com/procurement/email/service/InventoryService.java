@@ -21,6 +21,23 @@ import java.util.stream.Collectors;
 public class InventoryService {
 
     private final ItemRepository itemRepository;
+    private static final Map<String, String> TYPE_SYNONYMS = Map.of(
+        "mouse", "accessory",
+        "mice", "accessory",
+        "keyboard", "accessory",
+        "trackpad", "accessory",
+        "headset", "accessory",
+        "earbuds", "accessory",
+        "monitor", "monitor",
+        "laptop", "laptop"
+    );
+    private static final Map<String, String> SEARCH_KEYWORDS = Map.of(
+        "mouse", "mouse",
+        "mice", "mouse",
+        "accessory", "mouse",
+        "keyboard", "keyboard",
+        "trackpad", "trackpad"
+    );
 
     /**
      * Get a specific item by its ID.
@@ -54,9 +71,19 @@ public class InventoryService {
         }
 
         String normalizedType = itemType.toLowerCase().trim();
-        
-        // First, filter by type and availability from database
-        List<Item> matchingItems = itemRepository.findByTypeIgnoreCaseAndAvailableQuantityGreaterThan(normalizedType, 0);
+        String synonymType = TYPE_SYNONYMS.getOrDefault(normalizedType, normalizedType);
+
+        List<Item> matchingItems = new ArrayList<>();
+        Set<String> seenItemIds = new HashSet<>();
+
+        for (String candidateType : buildTypeCandidates(normalizedType, synonymType)) {
+            List<Item> typeMatches = itemRepository.findByTypeIgnoreCaseAndAvailableQuantityGreaterThan(candidateType, 0);
+            for (Item item : typeMatches) {
+                if (item != null && seenItemIds.add(item.getId())) {
+                    matchingItems.add(item);
+                }
+            }
+        }
         
         // If specs contain brand/model info, try to match by name too
         if (specs != null && !specs.isEmpty()) {
@@ -87,8 +114,51 @@ public class InventoryService {
             }
         }
 
+        if (matchingItems.isEmpty()) {
+            String keyword = SEARCH_KEYWORDS.getOrDefault(normalizedType, normalizedType);
+            List<Item> nameMatches = itemRepository.findByNameContainingIgnoreCase(keyword);
+            for (Item item : nameMatches) {
+                if (item != null && item.getAvailableQuantity() > 0 && seenItemIds.add(item.getId())) {
+                    matchingItems.add(item);
+                }
+            }
+            if (!matchingItems.isEmpty()) {
+                log.info("Found {} matching items by name keyword '{}'", matchingItems.size(), keyword);
+            }
+        }
+
         log.info("Found {} matching items for type: {}", matchingItems.size(), itemType);
         return matchingItems;
+    }
+
+    /**
+     * Retrieve all items that have at least one unit available.
+     */
+    public List<Item> listAllAvailableItems() {
+        List<Item> items = itemRepository.findByAvailableQuantityGreaterThan(0);
+        log.info("Loaded {} inventory items with available stock", items.size());
+        return items;
+    }
+
+    /**
+     * Retrieve items by IDs while preserving the input order where possible.
+     */
+    public List<Item> getItemsByIds(List<String> itemIds) {
+        if (itemIds == null || itemIds.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        Map<String, Item> itemMap = itemRepository.findAllById(itemIds).stream()
+                .collect(Collectors.toMap(Item::getId, item -> item, (a, b) -> a));
+
+        List<Item> ordered = new ArrayList<>();
+        for (String id : itemIds) {
+            Item item = itemMap.get(id);
+            if (item != null) {
+                ordered.add(item);
+            }
+        }
+        return ordered;
     }
     
     /**
@@ -108,6 +178,20 @@ public class InventoryService {
             itemRepository.save(item);
             log.info("Updated item {} quantity: {} -> {}", itemId, item.getAvailableQuantity() + quantity, newQuantity);
         }
+    }
+
+    private List<String> buildTypeCandidates(String normalizedType, String synonymType) {
+        Set<String> candidates = new LinkedHashSet<>();
+        if (normalizedType != null && !normalizedType.isBlank()) {
+            candidates.add(normalizedType);
+        }
+        if (synonymType != null && !synonymType.isBlank()) {
+            candidates.add(synonymType);
+        }
+        if (normalizedType != null && normalizedType.endsWith("s")) {
+            candidates.add(normalizedType.substring(0, normalizedType.length() - 1));
+        }
+        return new ArrayList<>(candidates);
     }
 
 }

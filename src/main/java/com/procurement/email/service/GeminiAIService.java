@@ -1,6 +1,8 @@
 package com.procurement.email.service;
 
-import com.procurement.email.integration.dto.*;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.procurement.email.integration.dto.*; // Importing necessary DTOs
 import com.procurement.email.model.EmailMessage;
 import com.procurement.email.model.Item;
 import com.procurement.email.model.ProcurementRequest;
@@ -26,14 +28,96 @@ public class GeminiAIService {
     private final RestTemplate geminiRestTemplate;
     private final String geminiApiUrl;
     private final int maxRetries;
+    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+    private final GeminiRequestResponseLogger requestResponseLogger;
+    private static final Map<String, Integer> NUMBER_WORDS;
+    private static final java.util.regex.Pattern NUMBER_WORD_PATTERN;
+    private static final java.util.regex.Pattern DIGIT_QUANTITY_PATTERN = java.util.regex.Pattern.compile("\\b([1-9][0-9]*)\\b");
+    private static final Map<String, List<String>> ITEM_TYPE_KEYWORDS;
+    private static final int MAX_INVENTORY_MATCH_ITEMS = 25;
+
+    static {
+        Map<String, Integer> words = new LinkedHashMap<>();
+        words.put("one", 1);
+        words.put("two", 2);
+        words.put("three", 3);
+        words.put("four", 4);
+        words.put("five", 5);
+        words.put("six", 6);
+        words.put("seven", 7);
+        words.put("eight", 8);
+        words.put("nine", 9);
+        words.put("ten", 10);
+        words.put("eleven", 11);
+        words.put("twelve", 12);
+        words.put("dozen", 12);
+        words.put("pair", 2);
+        words.put("couple", 2);
+        NUMBER_WORDS = Collections.unmodifiableMap(words);
+        String pattern = NUMBER_WORDS.keySet().stream()
+                .map(java.util.regex.Pattern::quote)
+                .collect(Collectors.joining("|"));
+        NUMBER_WORD_PATTERN = java.util.regex.Pattern.compile("\\b(" + pattern + ")\\b");
+
+    Map<String, List<String>> keywordMap = new LinkedHashMap<>();
+    keywordMap.put("laptop", List.of("laptop", "macbook", "notebook", "thinkpad", "xps", "mac book"));
+    keywordMap.put("monitor", List.of("monitor", "display", "screen", "ultrasharp", "4k"));
+    keywordMap.put("mouse", List.of("mouse", "mice", "trackpad", "pointer"));
+    keywordMap.put("keyboard", List.of("keyboard", "key board", "keypad", "mx keys"));
+    keywordMap.put("headset", List.of("headset", "headphones", "earbuds", "ear phones"));
+    keywordMap.put("accessory", List.of("accessory", "peripheral"));
+    keywordMap.put("software", List.of("software", "license", "subscription"));
+    ITEM_TYPE_KEYWORDS = Collections.unmodifiableMap(keywordMap);
+    }
 
     public GeminiAIService(
             @Qualifier("geminiRestTemplate") RestTemplate geminiRestTemplate,
             @Value("${gemini.api.url}") String geminiApiUrl,
-            @Value("${gemini.api.max-retries:3}") int maxRetries) {
+            @Value("${gemini.api.max-retries:3}") int maxRetries,
+            GeminiRequestResponseLogger requestResponseLogger) {
         this.geminiRestTemplate = geminiRestTemplate;
         this.geminiApiUrl = geminiApiUrl;
         this.maxRetries = maxRetries;
+        this.requestResponseLogger = requestResponseLogger;
+    }
+
+    /**
+     * Determines if an email is a procurement request, a follow-up reply, or unrelated.
+     * Also evaluates whether the email contains sufficient details to proceed.
+     */
+    public GeminiEmailIntentResponse analyzeEmailIntent(EmailMessage email) {
+        log.debug("Analyzing email intent for message: {}", email.getMessageId());
+
+        GeminiEmailIntentRequest request = GeminiEmailIntentRequest.builder()
+                .senderEmail(email.getFrom())
+                .emailSubject(email.getSubject())
+                .emailBody(email.getBody())
+                .inReplyToMessageId(email.getInReplyTo())
+                .build();
+
+        try {
+            GeminiEmailIntentResponse response = executeWithRetry(
+                    () -> determineEmailIntentWithGemini(request),
+                    "email intent analysis"
+            );
+
+            log.info("Email intent classified as {} (procurementRelated={}, hasAllDetails={}, reply={})",
+                    response.getIntentType(),
+                    response.isProcurementRelated(),
+                    response.isHasAllDetails(),
+                    response.isReply());
+
+            return response;
+        } catch (Exception e) {
+            log.error("Failed to analyze email intent after {} retries", maxRetries, e);
+            return GeminiEmailIntentResponse.builder()
+                    .procurementRelated(false)
+                    .reply(false)
+                    .hasAllDetails(false)
+                    .intentType(GeminiEmailIntentResponse.IntentType.NOT_PROCUREMENT)
+                    .reasoning("Fallback due to analysis error")
+                    .build();
+        }
     }
 
     /**
@@ -96,10 +180,7 @@ public class GeminiAIService {
         
         try {
             Map<String, Object> geminiRequest = buildGeminiRequest(prompt);
-            String endpoint = geminiApiUrl + "/models/gemini-2.0-flash-exp:generateContent";
-            
-            Map<String, Object> response = geminiRestTemplate.postForObject(
-                    endpoint, geminiRequest, Map.class);
+        Map<String, Object> response = postToGemini("validateProcurementEmail", geminiRequest);
             
             String text = extractTextFromGeminiResponse(response);
             log.info("Gemini validation response: {}", text);
@@ -148,6 +229,14 @@ public class GeminiAIService {
                         }
                     }
                 }
+            }
+            
+            OptionalInt explicitQuantity = detectExplicitQuantity(email.getSubject(), email.getBody());
+            if (explicitQuantity.isEmpty()) {
+                if (missingFields.stream().noneMatch(field -> field.equalsIgnoreCase("Quantity"))) {
+                    missingFields.add("Quantity");
+                }
+                hasAllInfo = false;
             }
             
             log.info("Validation result: hasAllInfo={}, missingFields={}", hasAllInfo, missingFields);
@@ -220,10 +309,25 @@ public class GeminiAIService {
             procurementRequest.setItemType(response.getItemType());
             procurementRequest.setItemName(response.getItemName());
             procurementRequest.setSpecifications(response.getSpecifications());
-            procurementRequest.setQuantity(response.getQuantity());
+            int quantity = response.getQuantity();
+            OptionalInt explicitQuantity = detectExplicitQuantity(email.getSubject(), email.getBody());
+            if (explicitQuantity.isPresent()) {
+                quantity = explicitQuantity.getAsInt();
+            } else {
+                if (quantity > 1) {
+                    log.debug("Gemini suggested quantity {} without explicit mention; defaulting to 1", quantity);
+                    quantity = 1;
+                } else if (quantity <= 0) {
+                    quantity = 1;
+                }
+            }
+            procurementRequest.setQuantity(quantity);
             procurementRequest.setEstimatedPrice(response.getEstimatedPrice());
             procurementRequest.setAdditionalNotes(response.getAdditionalNotes());
             procurementRequest.setRequestDate(email.getReceivedDate());
+            procurementRequest.setCandidateItemIds(Collections.emptyList());
+
+            normalizeExtractedItemDetails(procurementRequest, email);
 
             log.info("Extracted procurement request: itemType={}, itemName={}, quantity={}, estimatedPrice={}", 
                     response.getItemType(), response.getItemName(), response.getQuantity(), response.getEstimatedPrice());
@@ -232,6 +336,36 @@ public class GeminiAIService {
         } catch (Exception e) {
             log.error("Failed to extract request details after {} retries", maxRetries, e);
             throw new AIAnalysisException("Failed to extract procurement request details", e);
+        }
+    }
+
+    /**
+     * Parses a confirmation email to determine selected inventory items.
+     *
+     * @param request the confirmation parsing request payload
+     * @return the parsed confirmation response
+     */
+    public GeminiConfirmationResponse parseConfirmationEmail(GeminiConfirmationRequest request) {
+        log.debug("Parsing confirmation email for sender: {}", request.getSenderEmail());
+
+        try {
+            GeminiConfirmationResponse response = executeWithRetry(
+                    () -> parseConfirmationWithGemini(request),
+                    "confirmation parsing"
+            );
+
+            if (response.getSelectedItemIds() == null) {
+                response.setSelectedItemIds(Collections.emptyList());
+            }
+
+            return response;
+        } catch (Exception e) {
+            log.error("Failed to parse confirmation email after {} retries", maxRetries, e);
+            return GeminiConfirmationResponse.builder()
+                    .confirmed(false)
+                    .selectedItemIds(Collections.emptyList())
+                    .reasoning("Fallback due to Gemini error")
+                    .build();
         }
     }
 
@@ -283,6 +417,92 @@ public class GeminiAIService {
         }
     }
 
+    public GeminiInventoryMatchResponse matchInventoryItems(ProcurementRequest request, List<Item> inventoryItems) {
+    if (inventoryItems == null || inventoryItems.isEmpty()) {
+        return GeminiInventoryMatchResponse.builder()
+            .matchingItemIds(Collections.emptyList())
+            .reasoning("No inventory available")
+            .build();
+    }
+
+    try {
+        return executeWithRetry(
+            () -> matchInventoryItemsWithGemini(request, inventoryItems),
+            "inventory matching"
+        );
+    } catch (Exception e) {
+        log.error("Failed to match inventory items after {} retries", maxRetries, e);
+        return GeminiInventoryMatchResponse.builder()
+            .matchingItemIds(Collections.emptyList())
+            .reasoning("Match error")
+            .build();
+    }
+    }
+
+    private GeminiInventoryMatchResponse matchInventoryItemsWithGemini(ProcurementRequest request, List<Item> inventoryItems) {
+    String normalizedType = Optional.ofNullable(request.getItemType())
+        .map(value -> value.toLowerCase(Locale.ROOT))
+        .orElse(null);
+
+    List<Item> prioritized = inventoryItems.stream()
+        .filter(Objects::nonNull)
+        .sorted((a, b) -> {
+            boolean aMatch = itemTypeMatches(normalizedType, a.getType());
+            boolean bMatch = itemTypeMatches(normalizedType, b.getType());
+            if (aMatch == bMatch) {
+            return 0;
+            }
+            return aMatch ? -1 : 1;
+        })
+        .collect(Collectors.toList());
+
+    List<GeminiInventoryMatchRequest.InventoryItemSummary> summaries = prioritized.stream()
+        .limit(MAX_INVENTORY_MATCH_ITEMS)
+        .map(item -> GeminiInventoryMatchRequest.InventoryItemSummary.builder()
+            .itemId(item.getId())
+            .itemName(truncate(item.getName(), 80))
+            .itemType(item.getType())
+            .availableQuantity(item.getAvailableQuantity())
+            .build())
+        .collect(Collectors.toList());
+
+    GeminiInventoryMatchRequest matchRequest = GeminiInventoryMatchRequest.builder()
+        .itemType(request.getItemType())
+        .itemName(request.getItemName())
+        .quantity(request.getQuantity())
+        .specifications(request.getSpecifications())
+        .inventoryItems(summaries)
+        .build();
+
+    String prompt = buildInventoryMatchPrompt(matchRequest);
+    Map<String, Object> geminiRequest = buildGeminiRequest(prompt);
+
+    Map<String, Object> response = postToGemini("matchInventoryItems", geminiRequest);
+    return parseInventoryMatchResponse(response);
+    }
+
+    private boolean itemTypeMatches(String normalizedType, String candidateType) {
+        if (normalizedType == null || candidateType == null) {
+            return false;
+        }
+
+        String lowerCandidate = candidateType.toLowerCase(Locale.ROOT);
+        if (lowerCandidate.equals(normalizedType)) {
+            return true;
+        }
+
+        List<String> synonyms = ITEM_TYPE_KEYWORDS.get(normalizedType);
+        if (synonyms != null) {
+            for (String synonym : synonyms) {
+                if (lowerCandidate.contains(synonym)) {
+                    return true;
+                }
+            }
+        }
+
+        return lowerCandidate.contains(normalizedType);
+    }
+
     /**
      * Executes an operation with retry logic and exponential backoff.
      */
@@ -326,12 +546,8 @@ public class GeminiAIService {
         String prompt = buildClassificationPrompt(request);
         Map<String, Object> geminiRequest = buildGeminiRequest(prompt);
 
-        String endpoint = geminiApiUrl + "/models/gemini-2.0-flash-exp:generateContent";
-        
         try {
-            Map<String, Object> response = geminiRestTemplate.postForObject(
-                    endpoint, geminiRequest, Map.class);
-            
+            Map<String, Object> response = postToGemini("classifyEmail", geminiRequest);
             return parseClassificationResponse(response);
         } catch (RestClientException e) {
             log.error("Gemini API call failed for classification", e);
@@ -346,12 +562,8 @@ public class GeminiAIService {
         String prompt = buildExtractionPrompt(request);
         Map<String, Object> geminiRequest = buildGeminiRequest(prompt);
 
-        String endpoint = geminiApiUrl + "/models/gemini-2.0-flash-exp:generateContent";
-        
         try {
-            Map<String, Object> response = geminiRestTemplate.postForObject(
-                    endpoint, geminiRequest, Map.class);
-            
+            Map<String, Object> response = postToGemini("extractDetails", geminiRequest);
             return parseExtractionResponse(response);
         } catch (RestClientException e) {
             log.error("Gemini API call failed for extraction", e);
@@ -366,15 +578,24 @@ public class GeminiAIService {
         String prompt = buildRecommendationPrompt(request);
         Map<String, Object> geminiRequest = buildGeminiRequest(prompt);
 
-        String endpoint = geminiApiUrl + "/models/gemini-2.0-flash-exp:generateContent";
-        
         try {
-            Map<String, Object> response = geminiRestTemplate.postForObject(
-                    endpoint, geminiRequest, Map.class);
-            
+            Map<String, Object> response = postToGemini("recommendItems", geminiRequest);
             return parseRecommendationResponse(response, request.getAvailableItems());
         } catch (RestClientException e) {
             log.error("Gemini API call failed for recommendation", e);
+            throw e;
+        }
+    }
+
+    private GeminiConfirmationResponse parseConfirmationWithGemini(GeminiConfirmationRequest request) {
+        String prompt = buildConfirmationPrompt(request);
+        Map<String, Object> geminiRequest = buildGeminiRequest(prompt);
+
+        try {
+            Map<String, Object> response = postToGemini("parseConfirmation", geminiRequest);
+            return parseConfirmationResponse(response);
+        } catch (RestClientException e) {
+            log.error("Gemini API call failed for confirmation parsing", e);
             throw e;
         }
     }
@@ -427,11 +648,19 @@ public class GeminiAIService {
     }
 
     private String buildRecommendationPrompt(GeminiRecommendationRequest request) {
+        List<Item> availableItems = request.getAvailableItems() == null
+                ? Collections.emptyList()
+                : request.getAvailableItems();
+
         StringBuilder itemsList = new StringBuilder();
-        for (Item item : request.getAvailableItems()) {
-            itemsList.append(String.format("- ID: %s, Name: %s, Type: %s, Specs: %s, Available: %d\n",
-                    item.getId(), item.getName(), item.getType(),
-                    item.getSpecifications(), item.getAvailableQuantity()));
+        List<Item> nonNullItems = availableItems.stream()
+                .filter(Objects::nonNull)
+                .collect(Collectors.toList());
+
+        if (nonNullItems.isEmpty()) {
+            itemsList.append("- No inventory matches were found.\n");
+        } else {
+            nonNullItems.forEach(item -> itemsList.append(formatItemForPrompt(item)).append('\n'));
         }
 
         return String.format(
@@ -462,6 +691,263 @@ public class GeminiAIService {
         );
     }
 
+    private String formatItemForPrompt(Item item) {
+        StringBuilder builder = new StringBuilder();
+        builder.append("- ID: ").append(item.getId())
+                .append(", Name: ").append(truncate(item.getName(), 80));
+        if (item.getType() != null) {
+            builder.append(", Type: ").append(item.getType());
+        }
+        builder.append(", Available: ").append(item.getAvailableQuantity());
+        return builder.toString();
+    }
+
+    private String truncate(String value, int maxLength) {
+        if (value == null) {
+            return "";
+        }
+        if (value.length() <= maxLength) {
+            return value;
+        }
+        return value.substring(0, maxLength) + "...";
+    }
+
+    private OptionalInt detectExplicitQuantity(String... texts) {
+        if (texts == null || texts.length == 0) {
+            return OptionalInt.empty();
+        }
+
+        for (String text : texts) {
+            if (text == null || text.isBlank()) {
+                continue;
+            }
+
+            java.util.regex.Matcher digitMatcher = DIGIT_QUANTITY_PATTERN.matcher(text);
+            if (digitMatcher.find()) {
+                try {
+                    return OptionalInt.of(Integer.parseInt(digitMatcher.group(1)));
+                } catch (NumberFormatException ignored) {
+                    // Continue to word-based detection if parsing fails
+                }
+            }
+
+            String lower = text.toLowerCase(Locale.ROOT);
+            java.util.regex.Matcher wordMatcher = NUMBER_WORD_PATTERN.matcher(lower);
+            if (wordMatcher.find()) {
+                Integer value = NUMBER_WORDS.get(wordMatcher.group(1));
+                if (value != null) {
+                    return OptionalInt.of(value);
+                }
+            }
+        }
+
+        return OptionalInt.empty();
+    }
+
+    private void normalizeExtractedItemDetails(ProcurementRequest request, EmailMessage email) {
+        Optional<String> inferredType = detectItemType(email.getSubject(), email.getBody());
+        inferredType.ifPresent(type -> {
+            request.setItemType(type);
+            Map<String, String> specs = request.getSpecifications();
+            if (specs == null) {
+                specs = new HashMap<>();
+            }
+            specs.putIfAbsent("type", type);
+            request.setSpecifications(specs);
+
+            if (request.getItemName() == null || request.getItemName().isBlank() || !textContainsKeyword(request.getItemName(), ITEM_TYPE_KEYWORDS.get(type))) {
+                request.setItemName(capitalize(type));
+            }
+        });
+    }
+
+    private Optional<String> detectItemType(String... texts) {
+        if (texts == null) {
+            return Optional.empty();
+        }
+
+        Map<String, Integer> hitCount = new HashMap<>();
+        for (String text : texts) {
+            if (text == null || text.isBlank()) {
+                continue;
+            }
+            String lower = text.toLowerCase(Locale.ROOT);
+            for (Map.Entry<String, List<String>> entry : ITEM_TYPE_KEYWORDS.entrySet()) {
+                String type = entry.getKey();
+                for (String keyword : entry.getValue()) {
+                    if (lower.contains(keyword)) {
+                        hitCount.merge(type, 1, Integer::sum);
+                    }
+                }
+            }
+        }
+
+        return hitCount.entrySet().stream()
+                .max(Map.Entry.comparingByValue())
+                .map(Map.Entry::getKey);
+    }
+
+    private boolean textContainsKeyword(String text, List<String> keywords) {
+        if (text == null || keywords == null) {
+            return false;
+        }
+        String lower = text.toLowerCase(Locale.ROOT);
+        return keywords.stream().anyMatch(lower::contains);
+    }
+
+    private String capitalize(String value) {
+        if (value == null || value.isBlank()) {
+            return value;
+        }
+        return value.substring(0, 1).toUpperCase(Locale.ROOT) + value.substring(1).toLowerCase(Locale.ROOT);
+    }
+
+    private GeminiEmailIntentResponse determineEmailIntentWithGemini(GeminiEmailIntentRequest request) {
+        String prompt = buildIntentPrompt(request);
+        Map<String, Object> geminiRequest = buildGeminiRequest(prompt);
+
+        Map<String, Object> response = postToGemini("analyzeEmailIntent", geminiRequest);
+        return parseIntentResponse(response);
+    }
+
+    private String buildIntentPrompt(GeminiEmailIntentRequest request) {
+        String replyContext = request.getInReplyToMessageId() != null && !request.getInReplyToMessageId().isEmpty()
+                ? "This email is part of an existing thread (In-Reply-To header present)." :
+                "This email appears to start a new thread (no In-Reply-To header).";
+
+        return String.format(
+                "You are an assistant in charge of routing procurement-related emails.\n" +
+                "%s\n" +
+                "Classify the intent of the email and whether it contains enough information to process a procurement request.\n" +
+                "Focus on: item type, quantity, specifications, and whether the sender is confirming a recommendation.\n\n" +
+                "EMAIL DETAILS:\n" +
+                "From: %s\n" +
+                "Subject: %s\n" +
+                "Body:\n%s\n\n" +
+                "Respond in JSON with the following structure:\n" +
+                "{\n" +
+                "  \"isProcurementRelated\": true|false,\n" +
+                "  \"intentType\": \"NEW_REQUEST_WITH_DETAILS|NEW_REQUEST_MISSING_DETAILS|REPLY_CONFIRMATION|REPLY_INFORMATION|NOT_PROCUREMENT\",\n" +
+                "  \"hasAllDetails\": true|false,\n" +
+                "  \"isReply\": true|false,\n" +
+                "  \"missingDetails\": [\"Quantity\", \"Item Type\", ...],\n" +
+                "  \"reasoning\": \"short explanation\"\n" +
+                "}\n" +
+                "If the email confirms or approves a recommended item, set intentType to REPLY_CONFIRMATION even if the word 'confirm' isn't present explicitly.\n" +
+                "If the sender is providing additional information but not approving a purchase, use REPLY_INFORMATION.\n",
+                replyContext,
+                request.getSenderEmail(),
+                request.getEmailSubject(),
+                request.getEmailBody()
+        );
+    }
+
+    private GeminiEmailIntentResponse parseIntentResponse(Map<String, Object> response) {
+        try {
+            String text = extractTextFromGeminiResponse(response);
+            log.info("Gemini intent response: {}", text);
+
+            text = text.trim();
+            if (text.startsWith("```json")) {
+                text = text.substring(7);
+            }
+            if (text.endsWith("```")) {
+                text = text.substring(0, text.length() - 3);
+            }
+            text = text.trim();
+
+            JsonNode root = OBJECT_MAPPER.readTree(text);
+
+            boolean isProcurement = root.path("isProcurementRelated").asBoolean(false);
+            boolean hasAllDetails = root.path("hasAllDetails").asBoolean(false);
+            boolean isReply = root.path("isReply").asBoolean(false);
+
+            String intentValue = root.path("intentType").asText("NOT_PROCUREMENT").toUpperCase(Locale.ROOT);
+            GeminiEmailIntentResponse.IntentType intentType;
+            try {
+                intentType = GeminiEmailIntentResponse.IntentType.valueOf(intentValue);
+            } catch (IllegalArgumentException ex) {
+                intentType = GeminiEmailIntentResponse.IntentType.NOT_PROCUREMENT;
+            }
+
+            List<String> missing = new ArrayList<>();
+            JsonNode missingNode = root.get("missingDetails");
+            if (missingNode != null && missingNode.isArray()) {
+                missingNode.forEach(node -> {
+                    if (node.isTextual()) {
+                        missing.add(node.asText());
+                    }
+                });
+            }
+
+            String reasoning = null;
+            if (root.has("reasoning") && root.get("reasoning").isTextual()) {
+                reasoning = root.get("reasoning").asText();
+            }
+
+            return GeminiEmailIntentResponse.builder()
+                    .procurementRelated(isProcurement)
+                    .hasAllDetails(hasAllDetails)
+                    .reply(isReply)
+                    .intentType(intentType)
+                    .missingDetails(missing)
+                    .reasoning(reasoning)
+                    .build();
+        } catch (Exception e) {
+            log.error("Failed to parse intent response", e);
+            return GeminiEmailIntentResponse.builder()
+                    .procurementRelated(false)
+                    .hasAllDetails(false)
+                    .reply(false)
+                    .intentType(GeminiEmailIntentResponse.IntentType.NOT_PROCUREMENT)
+                    .reasoning("Parse error")
+                    .build();
+        }
+    }
+
+    private GeminiInventoryMatchResponse parseInventoryMatchResponse(Map<String, Object> response) {
+        try {
+            String text = extractTextFromGeminiResponse(response);
+            log.info("Gemini inventory match response: {}", text);
+
+            text = text.trim();
+            if (text.startsWith("```json")) {
+                text = text.substring(7);
+            }
+            if (text.endsWith("```")) {
+                text = text.substring(0, text.length() - 3);
+            }
+            text = text.trim();
+
+            JsonNode root = OBJECT_MAPPER.readTree(text);
+            List<String> matchingIds = new ArrayList<>();
+            JsonNode idsNode = root.get("matchingItemIds");
+            if (idsNode != null && idsNode.isArray()) {
+                idsNode.forEach(node -> {
+                    if (node != null && node.isTextual() && !node.asText().isBlank()) {
+                        matchingIds.add(node.asText());
+                    }
+                });
+            }
+
+            String reasoning = null;
+            if (root.has("reasoning") && root.get("reasoning").isTextual()) {
+                reasoning = root.get("reasoning").asText();
+            }
+
+            return GeminiInventoryMatchResponse.builder()
+                    .matchingItemIds(matchingIds)
+                    .reasoning(reasoning)
+                    .build();
+        } catch (Exception e) {
+            log.error("Failed to parse inventory match response", e);
+            return GeminiInventoryMatchResponse.builder()
+                    .matchingItemIds(Collections.emptyList())
+                    .reasoning("Parse error")
+                    .build();
+        }
+    }
+
     private Map<String, Object> buildGeminiRequest(String prompt) {
         Map<String, Object> content = new HashMap<>();
         Map<String, Object> part = new HashMap<>();
@@ -472,6 +958,89 @@ public class GeminiAIService {
         request.put("contents", Collections.singletonList(content));
 
         return request;
+    }
+
+    private String buildInventoryMatchPrompt(GeminiInventoryMatchRequest request) {
+        StringBuilder specsSection = new StringBuilder();
+        if (request.getSpecifications() != null && !request.getSpecifications().isEmpty()) {
+            specsSection.append("- Specifications:\n");
+            request.getSpecifications().forEach((key, value) ->
+                    specsSection.append(String.format("  - %s: %s\n", key, value))
+            );
+        }
+
+        StringBuilder inventorySection = new StringBuilder();
+        int index = 1;
+        for (GeminiInventoryMatchRequest.InventoryItemSummary item : request.getInventoryItems()) {
+            inventorySection.append(String.format(
+                    "%d. %s :: %s (Type=%s, Available=%d)\n",
+                    index++,
+                    item.getItemId(),
+                    item.getItemName(),
+                    item.getItemType(),
+                    item.getAvailableQuantity() == null ? 0 : item.getAvailableQuantity()
+            ));
+        }
+
+        return String.format(
+                "You are an inventory specialist matching a procurement request to on-hand stock.\n" +
+                "Select items whose type matches the user's requested item. Favor exact type matches; ignore unrelated items.\n" +
+                "If nothing matches, return an empty list.\n\n" +
+                "PROCUREMENT REQUEST:\n" +
+                "- Item Type: %s\n" +
+                "- Item Name: %s\n" +
+                "- Quantity: %s\n" +
+                "%s\n" +
+                "INVENTORY CATALOG (ID :: Name):\n%s\n" +
+                "Respond in compact JSON with: {\n" +
+                "  \"matchingItemIds\": [list of IDs that match],\n" +
+                "  \"reasoning\": \"short explanation\"\n" +
+                "}\n" +
+                "Only return IDs that appear in the catalog above.",
+                Optional.ofNullable(request.getItemType()).orElse("unknown"),
+                Optional.ofNullable(request.getItemName()).orElse("unknown"),
+                Optional.ofNullable(request.getQuantity()).map(Object::toString).orElse("unknown"),
+                specsSection,
+                inventorySection
+        );
+    }
+
+    private String buildConfirmationPrompt(GeminiConfirmationRequest request) {
+        StringBuilder candidatesSection = new StringBuilder();
+        if (request.getCandidateItems() == null || request.getCandidateItems().isEmpty()) {
+            candidatesSection.append("- No inventory candidates provided. Assume new purchase unless the user references a known ID.\n");
+        } else {
+            candidatesSection.append("- Here are the only valid inventory options (ID :: Name). If none match, leave the list empty.\n");
+            request.getCandidateItems().forEach(item ->
+                    candidatesSection.append(String.format("  - %s :: %s\n",
+                            item.getItemId(), item.getItemName()))
+            );
+        }
+
+        return String.format(
+                "You are a procurement assistant helping interpret a confirmation reply.\n" +
+                "Sender email: %s\n" +
+                "Subject: %s\n" +
+                "Reply Body (trimmed):\n%s\n\n" +
+                "CONTEXT:\n" +
+                "%s\n" +
+                "TASK:\n" +
+                "1. Determine if the user confirmed proceeding with procurement.\n" +
+                "2. Match the confirmation to one or more item IDs from the inventory list above.\n" +
+                "3. Only return IDs that appear in the inventory list. If nothing matches, return an empty list.\n" +
+                "4. If the user declines or is unclear, mark confirmed=false.\n" +
+                "5. Keep the response concise.\n\n" +
+                "Respond ONLY in JSON using this format:\n" +
+                "{\n" +
+                "  \"confirmed\": true|false,\n" +
+                "  \"selectedItemIds\": [\"ID-1\", \"ID-2\"],\n" +
+                "  \"reasoning\": \"very short explanation\"\n" +
+                "}\n",
+                request.getSenderEmail(),
+                request.getEmailSubject(),
+                request.getEmailBody(),
+                candidatesSection
+        );
     }
 
     @SuppressWarnings("unchecked")
@@ -658,6 +1227,67 @@ public class GeminiAIService {
         } catch (Exception e) {
             log.error("Failed to parse recommendation response", e);
             throw new AIAnalysisException("Failed to parse recommendation response", e);
+        }
+    }
+
+    private GeminiConfirmationResponse parseConfirmationResponse(Map<String, Object> response) {
+        try {
+            String text = extractTextFromGeminiResponse(response);
+            log.info("Gemini confirmation parsing response: {}", text);
+
+            text = text.trim();
+            if (text.startsWith("```json")) {
+                text = text.substring(7);
+            }
+            if (text.endsWith("```")) {
+                text = text.substring(0, text.length() - 3);
+            }
+            text = text.trim();
+
+            JsonNode root = OBJECT_MAPPER.readTree(text);
+            boolean confirmed = root.path("confirmed").asBoolean(false);
+
+            List<String> selectedIds = new ArrayList<>();
+            JsonNode idsNode = root.get("selectedItemIds");
+            if (idsNode != null && idsNode.isArray()) {
+                idsNode.forEach(node -> {
+                    if (node.isTextual() && !node.asText().isBlank()) {
+                        selectedIds.add(node.asText().trim());
+                    }
+                });
+            }
+
+            String reasoning = null;
+            if (root.has("reasoning") && root.get("reasoning").isTextual()) {
+                reasoning = root.get("reasoning").asText();
+            }
+
+            return GeminiConfirmationResponse.builder()
+                    .confirmed(confirmed)
+                    .selectedItemIds(selectedIds)
+                    .reasoning(reasoning)
+                    .build();
+        } catch (Exception e) {
+            log.error("Failed to parse confirmation response", e);
+            return GeminiConfirmationResponse.builder()
+                    .confirmed(false)
+                    .selectedItemIds(Collections.emptyList())
+                    .reasoning("Parse error")
+                    .build();
+        }
+    }
+
+    private Map<String, Object> postToGemini(String operation, Map<String, Object> payload) {
+        String endpoint = geminiApiUrl + "/models/gemini-2.0-flash-exp:generateContent";
+        requestResponseLogger.logRequest(operation, payload);
+        try {
+            Map<String, Object> response = geminiRestTemplate.postForObject(
+                    endpoint, payload, Map.class);
+            requestResponseLogger.logResponse(operation, response);
+            return response;
+        } catch (RestClientException e) {
+            requestResponseLogger.logResponse(operation, Collections.singletonMap("error", e.getMessage()));
+            throw e;
         }
     }
 
