@@ -1,6 +1,4 @@
-package com.bracits.bpabackendstarter;
-
-
+package com.procurement.email.bpa;
 
 
 import com.bracits.abs.bpaclient.BusinessProcessAutomationClient;
@@ -8,11 +6,12 @@ import com.bracits.abs.bpaclient.dto.Action;
 import com.bracits.abs.bpaclient.dto.TaskAction;
 import com.bracits.abs.bpaclient.dto.TaskPerformRequest;
 import com.bracits.abs.bpaclient.dto.WorkflowDto;
-import java.lang.reflect.InvocationTargetException;
 import lombok.SneakyThrows;
 import lombok.extern.log4j.Log4j2;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
+
+import java.lang.reflect.InvocationTargetException;
 
 
 @Service
@@ -33,7 +32,7 @@ public class WorkflowService {
       IllegalAccessException {
 
     TaskPerformRequest request = new TaskPerformRequest();
-    request.setModule(ApplicationConstants.ACTIVITI_MODULE_NAME);
+    request.setModule("proc");
     request.setKey(workflowDto.getKey());
     request.setTitle(workflowDto.getTitle());
     request.setRef(workflowDto.getRef());
@@ -71,7 +70,7 @@ public class WorkflowService {
       workflowDto.setKey(activityKey);
       workflowDto.setRef(refId);
       workflowDto.setTitle(title);
-      workflowDto.setAction(ApplicationConstants.ACTIVITI_PROCESS_START);
+      workflowDto.setAction("start");
       this.performProcess(workflowDto);
     }
   }
@@ -89,7 +88,7 @@ public class WorkflowService {
       WorkflowDto workflowDto = new WorkflowDto();
       workflowDto.setKey(activityKey);
       workflowDto.setRef(refId);
-      workflowDto.setAction(ApplicationConstants.ACTIVITI_PROCESS_START);
+      workflowDto.setAction("start");
       workflowDto.setTitle(title);
       workflowDto.setRemarks(remarks);
       this.performProcess(workflowDto);

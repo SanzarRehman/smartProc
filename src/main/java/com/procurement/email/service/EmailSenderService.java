@@ -100,6 +100,7 @@ public class EmailSenderService {
         String body = buildConfirmationEmailBody(po);
         
         sendEmailWithRetry(to, subject, body, inReplyToMessageId);
+
     }
 
     /**

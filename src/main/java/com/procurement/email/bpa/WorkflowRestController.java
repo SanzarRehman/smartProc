@@ -1,12 +1,13 @@
-package com.bracits.bpabackendstarter;
+package com.procurement.email.bpa;
 
 
 import com.bracits.abs.bpaclient.dto.WorkflowDto;
-import java.lang.reflect.InvocationTargetException;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RestController;
+
+import java.lang.reflect.InvocationTargetException;
 
 
 @RestController

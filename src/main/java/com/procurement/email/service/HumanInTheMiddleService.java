@@ -1,5 +1,9 @@
 package com.procurement.email.service;
 
+import com.bracits.abs.bpaclient.BusinessProcessAutomationClient;
+import com.bracits.abs.bpaclient.dto.Action;
+import com.bracits.abs.bpaclient.dto.TaskPerformRequest;
+import com.bracits.abs.bpaclient.dto.WorkflowDto;
 import com.procurement.email.model.Item;
 import com.procurement.email.model.PurchaseOrder;
 import jakarta.mail.MessagingException;
@@ -10,7 +14,15 @@ import org.springframework.mail.javamail.JavaMailSender;
 import org.springframework.mail.javamail.MimeMessageHelper;
 import org.springframework.stereotype.Service;
 
+import java.io.IOException;
+import java.lang.reflect.InvocationTargetException;
 import java.math.BigDecimal;
+import java.net.URI;
+import java.net.URLEncoder;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Map;
@@ -21,7 +33,7 @@ import java.util.Map;
 @Service
 @RequiredArgsConstructor
 @Slf4j
-public class EmailSenderService {
+public class HumanInTheMiddleService {
 
     private final JavaMailSender mailSender;
     private final InventoryService inventoryService;
@@ -29,668 +41,68 @@ public class EmailSenderService {
     private static final long RETRY_DELAY_MS = 2000;
     private static final DateTimeFormatter DATE_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
-    /**
-     * Sends a recommendation email with a list of suggested items from inventory.
-     *
-     * @param to the recipient email address
-     * @param recommendations the list of recommended items
-     * @param similarProducts map of item IDs to similarity scores for similar products
-     * @param request the original procurement request
-     * @param inReplyToMessageId the message ID of the original email (for threading)
-     * @param originalSubject the subject of the original email
-     */
-    public void sendRecommendationEmail(String to, List<Item> recommendations, 
-                                       Map<String, Float> similarProducts,
-                                       com.procurement.email.model.ProcurementRequest request,
-                                       String inReplyToMessageId, String originalSubject) {
-        log.info("Sending recommendation email to: {} (in reply to: {})", to, inReplyToMessageId);
-        
-        // Use "Re: " + original subject for proper email threading
-        String subject = originalSubject;
-        if (!subject.toLowerCase().startsWith("re:")) {
-            subject = "Re: " + subject;
-        }
-        
-        String body = buildRecommendationEmailBody(recommendations, similarProducts, request);
-        
-        sendEmailWithRetry(to, subject, body, inReplyToMessageId);
-    }
-    
-    /**
-     * Sends a confirmation request email for new purchase (no inventory match).
-     *
-     * @param to the recipient email address
-     * @param request the procurement request
-     * @param inReplyToMessageId the message ID of the original email (for threading)
-     * @param originalSubject the subject of the original email
-     */
-    public void sendNewPurchaseConfirmationEmail(String to, 
-                                                com.procurement.email.model.ProcurementRequest request,
-                                                String inReplyToMessageId, String originalSubject) {
-        log.info("Sending new purchase confirmation request to: {} (in reply to: {})", to, inReplyToMessageId);
-        
-        // Use "Re: " + original subject for proper email threading
-        String subject = originalSubject;
-        if (!subject.toLowerCase().startsWith("re:")) {
-            subject = "Re: " + subject;
-        }
-        
-        String body = buildNewPurchaseConfirmationEmailBody(request);
-        
-        sendEmailWithRetry(to, subject, body, inReplyToMessageId);
-    }
+    private final BusinessProcessAutomationClient businessProcessAutomationClient;
 
-    /**
-     * Sends a confirmation email with purchase order details.
-     *
-     * @param to the recipient email address
-     * @param po the purchase order
-     * @param inReplyToMessageId the message ID of the original email (for threading)
-     * @param originalSubject the subject of the original email
-     */
-    public void sendConfirmationEmail(String to, PurchaseOrder po, String inReplyToMessageId, String originalSubject) {
-        log.info("Sending confirmation email to: {} for PO: {} (in reply to: {})", to, po.getPoNumber(), inReplyToMessageId);
-        
-        // Use "Re: " + original subject for proper email threading
-        String subject = originalSubject;
-        if (!subject.toLowerCase().startsWith("re:")) {
-            subject = "Re: " + subject;
-        }
-        
-        String body = buildConfirmationEmailBody(po);
-        
-        sendEmailWithRetry(to, subject, body, inReplyToMessageId);
+    public void sendForApproval(String to, PurchaseOrder po, String inReplyToMessageId, String originalSubject) {
 
-    }
+        String url = "https://bracusso.bracits.net/realms/usis/protocol/openid-connect/token";
+        String clientId = "slm-manage-user";
+        String clientSecret = "R5asm0brJPi6DXc0xHB2PnF7pai9mNuG";
+        String grantType = "client_credentials";
 
-    /**
-     * Sends an error notification email.
-     *
-     * @param to the recipient email address
-     * @param errorMessage the error message to include
-     */
-    public void sendErrorEmail(String to, String errorMessage) {
-        log.info("Sending error email to: {}", to);
-        
-        String subject = "Procurement Request - Processing Error";
-        String body = buildErrorEmailBody(errorMessage);
-        
-        sendEmailWithRetry(to, subject, body);
-    }
+        String formData = "client_id=" + URLEncoder.encode(clientId, StandardCharsets.UTF_8)
+            + "&grant_type=" + URLEncoder.encode(grantType, StandardCharsets.UTF_8)
+            + "&client_secret=" + URLEncoder.encode(clientSecret, StandardCharsets.UTF_8);
 
-    /**
-     * Sends a template guide email when the procurement request doesn't match the required format.
-     *
-     * @param to the recipient email address
-     * @param missingFields list of missing required fields
-     * @param inReplyToMessageId the message ID of the original email (for threading)
-     * @param originalSubject the subject of the original email
-     */
-    public void sendTemplateGuideEmail(String to, List<String> missingFields, String inReplyToMessageId, String originalSubject) {
-        log.info("Sending template guide email to: {} (missing fields: {})", to, missingFields);
-        
-        // Use "Re: " + original subject for proper email threading
-        String subject = originalSubject;
-        if (!subject.toLowerCase().startsWith("re:")) {
-            subject = "Re: " + subject;
-        }
-        
-        String body = buildTemplateGuideEmailBody(missingFields);
-        
-        sendEmailWithRetry(to, subject, body, inReplyToMessageId);
-    }
+        HttpRequest request = HttpRequest.newBuilder()
+            .uri(URI.create(url))
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .POST(HttpRequest.BodyPublishers.ofString(formData))
+            .build();
 
-    /**
-     * Sends a user registration request email.
-     *
-     * @param to the recipient email address
-     */
-    public void sendRegistrationRequestEmail(String to) {
-        log.info("Sending registration request email to: {}", to);
-        
-        String subject = "Procurement System - Registration Required";
-        String body = buildRegistrationRequestEmailBody();
-        
-        sendEmailWithRetry(to, subject, body);
-    }
+        HttpClient client = HttpClient.newHttpClient();
+        HttpResponse<String> response = null;
+        try {
+            response = client.send(request, HttpResponse.BodyHandlers.ofString());
+        } catch (IOException e) {
+          throw new RuntimeException(e);
+        } catch (InterruptedException e) {
+          throw new RuntimeException(e);
+        }
 
-    /**
-     * Sends an email with retry logic (up to 3 attempts).
-     *
-     * @param to the recipient email address
-     * @param subject the email subject
-     * @param body the email body (HTML)
-     */
-    private void sendEmailWithRetry(String to, String subject, String body) {
-        sendEmailWithRetry(to, subject, body, null);
-    }
-    
-    private void sendEmailWithRetry(String to, String subject, String body, String inReplyToMessageId) {
-        int attempt = 0;
-        Exception lastException = null;
-        
-        while (attempt < MAX_RETRY_ATTEMPTS) {
-            attempt++;
-            try {
-                sendEmail(to, subject, body, inReplyToMessageId);
-                log.info("Email sent successfully to {} on attempt {}", to, attempt);
-                return;
-            } catch (Exception e) {
-                lastException = e;
-                log.warn("Failed to send email to {} on attempt {}: {}", to, attempt, e.getMessage());
-                
-                if (attempt < MAX_RETRY_ATTEMPTS) {
-                    try {
-                        Thread.sleep(RETRY_DELAY_MS * attempt); // Exponential backoff
-                    } catch (InterruptedException ie) {
-                        Thread.currentThread().interrupt();
-                        log.error("Retry interrupted for email to {}", to);
-                        break;
-                    }
-                }
-            }
-        }
-        
-        log.error("Failed to send email to {} after {} attempts", to, MAX_RETRY_ATTEMPTS, lastException);
-        throw new EmailDeliveryException("Failed to send email after " + MAX_RETRY_ATTEMPTS + " attempts", lastException);
-    }
 
-    /**
-     * Sends an email using JavaMailSender.
-     *
-     * @param to the recipient email address
-     * @param subject the email subject
-     * @param body the email body (HTML)
-     * @throws MessagingException if email sending fails
-     */
-    private void sendEmail(String to, String subject, String body) throws MessagingException {
-        sendEmail(to, subject, body, null);
-    }
-    
-    private void sendEmail(String to, String subject, String body, String inReplyTo) throws MessagingException {
-        MimeMessage message = mailSender.createMimeMessage();
-        MimeMessageHelper helper = new MimeMessageHelper(message, true, "UTF-8");
-        
-        helper.setFrom("procurementpoc2025@gmail.com");  // Set from address
-        helper.setTo(to);
-        helper.setSubject(subject);
-        helper.setText(body, true); // true indicates HTML
-        
-        // If this is a reply, set the In-Reply-To and References headers for email threading
-        if (inReplyTo != null && !inReplyTo.isEmpty()) {
-            log.info("Setting reply headers - In-Reply-To: {}", inReplyTo);
-            message.setHeader("In-Reply-To", inReplyTo);
-            message.setHeader("References", inReplyTo);
-            
-            // Also set the Message-ID to help with threading
-            // Gmail uses these headers to thread conversations
-        } else {
-            log.debug("Sending new email (not a reply)");
-        }
-        
-        mailSender.send(message);
-        log.info("Email sent to: {} with subject: {}", to, subject);
-    }
+      String token = "Bearer"+response.body().split("\"access_token\":\"")[1].split("\"")[0];
 
-    /**
-     * Builds the HTML body for template guide email.
-     *
-     * @param missingFields list of missing required fields
-     * @return the HTML email body
-     */
-    private String buildTemplateGuideEmailBody(List<String> missingFields) {
-        StringBuilder html = new StringBuilder();
-        html.append("<html><body>");
-        html.append("<h2>Procurement Request - Additional Information Needed</h2>");
-        html.append("<p>Dear Requester,</p>");
-        html.append("<p>Thank you for your procurement request. To process it efficiently, we need a bit more information:</p>");
-        
-        if (!missingFields.isEmpty()) {
-            html.append("<div style='background-color: #fff3cd; padding: 15px; border-left: 4px solid #ffc107; margin: 15px 0;'>");
-            html.append("<p><strong>Please provide:</strong></p>");
-            html.append("<ul style='margin: 5px 0;'>");
-            for (String field : missingFields) {
-                html.append("<li><strong>").append(escapeHtml(field)).append("</strong>");
-                if (field.contains("Item Type")) {
-                    html.append(" - What item/equipment do you need? (e.g., laptop, monitor, mouse, software, furniture, office supplies)");
-                } else if (field.contains("Quantity")) {
-                    html.append(" - How many units do you need? (e.g., 1, 2, 5)");
-                }
-                html.append("</li>");
-            }
-            html.append("</ul>");
-            html.append("</div>");
-        }
-        
-        html.append("<hr>");
-        html.append("<h3>Procurement Request Guide</h3>");
-        html.append("<p>You can structure your request in any natural way, or use this template:</p>");
-        html.append("<div style='background-color: #f5f5f5; padding: 15px; border: 1px solid #ddd; margin: 15px 0;'>");
-        html.append("<p style='margin: 5px 0;'><strong>Item Type:</strong> [What you need - laptop, monitor, software, furniture, supplies, etc.]</p>");
-        html.append("<p style='margin: 5px 0;'><strong>Quantity:</strong> [How many units]</p>");
-        html.append("<p style='margin: 5px 0;'><strong>Specifications:</strong> [Optional - any specific requirements, features, or models]</p>");
-        html.append("<p style='margin: 5px 0;'><strong>Reason:</strong> [Optional - why you need this]</p>");
-        html.append("<p style='margin: 5px 0;'><strong>Notes:</strong> [Optional - urgency, preferences, etc.]</p>");
-        html.append("</div>");
-        
-        html.append("<h4>Examples:</h4>");
-        html.append("<div style='background-color: #e8f5e9; padding: 10px; border-left: 3px solid #4caf50; margin: 10px 0;'>");
-        html.append("<p style='margin: 5px 0; font-style: italic;'>\"I need 2 laptops with 16GB RAM for development work. Urgent.\"</p>");
-        html.append("</div>");
-        html.append("<div style='background-color: #e8f5e9; padding: 10px; border-left: 3px solid #4caf50; margin: 10px 0;'>");
-        html.append("<p style='margin: 5px 0; font-style: italic;'>\"Item Type: Wireless Mouse<br>Quantity: 5<br>For the new team members\"</p>");
-        html.append("</div>");
-        html.append("<div style='background-color: #e8f5e9; padding: 10px; border-left: 3px solid #4caf50; margin: 10px 0;'>");
-        html.append("<p style='margin: 5px 0; font-style: italic;'>\"Need a 27-inch monitor, preferably 4K resolution\"</p>");
-        html.append("</div>");
-        
-        html.append("<p><strong>Simply reply to this email with the information above.</strong></p>");
-        html.append("<p>We'll process your request as soon as we receive the complete details.</p>");
-        
-        html.append("<p>Best regards,<br>Procurement Automation System</p>");
-        html.append("</body></html>");
-        
-        return html.toString();
-    }
 
-    /**
-     * Builds the HTML body for recommendation email with inventory items and similar products.
-     *
-     * @param recommendations the list of recommended items
-     * @param similarProducts map of item IDs to similarity scores
-     * @param request the original procurement request
-     * @return the HTML email body
-     */
-    private String buildRecommendationEmailBody(List<Item> recommendations,
-                                               Map<String, Float> similarProducts,
-                                               com.procurement.email.model.ProcurementRequest request) {
-        StringBuilder html = new StringBuilder();
-        html.append("<html><body>");
-        html.append("<h2>✓ Available Items Found</h2>");
-        html.append("<p>Dear Requester,</p>");
-        
-        // Show what they requested
-        html.append("<div style='background-color: #e3f2fd; padding: 15px; border-left: 4px solid #2196f3; margin: 15px 0;'>");
-        html.append("<p style='margin: 5px 0;'><strong>Your Request:</strong></p>");
-        html.append("<p style='margin: 5px 0;'>Item: <strong>").append(escapeHtml(request.getItemName() != null ? request.getItemName() : request.getItemType())).append("</strong></p>");
-        html.append("<p style='margin: 5px 0;'>Quantity: <strong>").append(request.getQuantity()).append("</strong></p>");
-        if (request.getAdditionalNotes() != null && !request.getAdditionalNotes().isEmpty()) {
-            html.append("<p style='margin: 5px 0;'>Notes: ").append(escapeHtml(request.getAdditionalNotes())).append("</p>");
-        }
-        html.append("</div>");
-        
-        html.append("<p>Great news! We found matching items in our inventory:</p>");
-        
-        if (recommendations.isEmpty()) {
-            html.append("<p><strong>No matching items found in inventory.</strong></p>");
-            html.append("<p>We'll proceed with a new purchase order.</p>");
-        } else {
-            html.append("<div style='margin: 20px 0;'>");
-            
-            for (int i = 0; i < recommendations.size(); i++) {
-                Item item = recommendations.get(i);
-                html.append("<div style='border: 2px solid #4caf50; border-radius: 8px; padding: 15px; margin: 15px 0; background-color: #f9f9f9;'>");
-                html.append("<h3 style='margin-top: 0; color: #2e7d32;'>Option ").append(i + 1).append(": ").append(escapeHtml(item.getName())).append("</h3>");
-                html.append("<p style='font-size: 18px; color: #1976d2; margin: 10px 0;'><strong>Price: $").append(formatCurrency(item.getBookValue())).append(" per unit</strong></p>");
-                html.append("<p style='margin: 5px 0;'><strong>Item ID:</strong> ").append(escapeHtml(item.getId())).append("</p>");
-                html.append("<p style='margin: 5px 0;'><strong>Available Quantity:</strong> ").append(item.getAvailableQuantity()).append(" units</p>");
-                
-                if (item.getSpecifications() != null && !item.getSpecifications().isEmpty()) {
-                    html.append("<p style='margin: 10px 0 5px 0;'><strong>Specifications:</strong></p>");
-                    html.append("<ul style='margin: 5px 0;'>");
-                    for (Map.Entry<String, String> entry : item.getSpecifications().entrySet()) {
-                        if (!entry.getKey().equals("subtype")) {
-                            html.append("<li><strong>").append(escapeHtml(formatSpecKey(entry.getKey()))).append(":</strong> ")
-                                .append(escapeHtml(entry.getValue())).append("</li>");
-                        }
-                    }
-                    html.append("</ul>");
-                }
-                
-                // Calculate total for requested quantity
-                java.math.BigDecimal total = item.getBookValue().multiply(java.math.BigDecimal.valueOf(request.getQuantity()));
-                html.append("<p style='margin: 10px 0; padding: 10px; background-color: #fff3cd; border-radius: 4px;'>");
-                html.append("<strong>Total for ").append(request.getQuantity()).append(" unit(s): $").append(formatCurrency(total)).append("</strong>");
-                html.append("</p>");
-                
-                html.append("</div>");
-            }
-            
-            html.append("</div>");
-            
-            html.append("<div style='background-color: #fff3cd; padding: 15px; border-left: 4px solid #ffc107; margin: 20px 0;'>");
-            html.append("<p style='margin: 0;'><strong>To confirm your selection:</strong></p>");
-            html.append("<p style='margin: 10px 0;'>Simply <strong>reply to this email</strong> with:</p>");
-            html.append("<ul style='margin: 5px 0;'>");
-            html.append("<li>The <strong>Item ID</strong> (e.g., \"").append(escapeHtml(recommendations.get(0).getId())).append("\"), OR</li>");
-            html.append("<li>The <strong>Item Name</strong> (e.g., \"").append(escapeHtml(recommendations.get(0).getName())).append("\"), OR</li>");
-            html.append("<li>Just say \"<strong>Option 1</strong>\" or \"<strong>Confirm first option</strong>\"</li>");
-            html.append("<li>If <strong>none of these work</strong>, reply with \"<strong>Proceed with new purchase</strong>\" or \"<strong>None of these</strong>\" and we'll order it for you.</li>");
-            html.append("</ul>");
-            html.append("</div>");
-        }
-        
-        // Add similar products section if available
-        if (similarProducts != null && !similarProducts.isEmpty()) {
-            html.append("<hr style='margin: 30px 0; border: none; border-top: 2px solid #e0e0e0;'>");
-            html.append("<h2 style='color: #1976d2;'>💡 You Might Also Like</h2>");
-            html.append("<p>Based on your request, we found these similar products that might interest you:</p>");
-            
-            html.append("<div style='margin: 20px 0;'>");
-            
-            int similarCount = 0;
-            for (Map.Entry<String, Float> entry : similarProducts.entrySet()) {
-                String itemId = entry.getKey();
-                Float score = entry.getValue();
-                
-                // Skip items already in recommendations to avoid duplicates
-                boolean alreadyRecommended = recommendations.stream()
-                        .anyMatch(item -> item.getId().equals(itemId));
-                if (alreadyRecommended) {
-                    continue;
-                }
-                
-                // Fetch item details
-                Item item = inventoryService.getItemById(itemId);
-                if (item == null) {
-                    continue;
-                }
-                
-                similarCount++;
-                int matchPercentage = Math.round(score * 100);
-                
-                html.append("<div style='border: 2px solid #9e9e9e; border-radius: 8px; padding: 15px; margin: 15px 0; background-color: #fafafa;'>");
-                html.append("<h3 style='margin-top: 0; color: #424242;'>");
-                html.append("<span style='background-color: #2196f3; color: white; padding: 3px 8px; border-radius: 4px; font-size: 14px; margin-right: 10px;'>");
-                html.append(matchPercentage).append("% Match</span>");
-                html.append(escapeHtml(item.getName()));
-                html.append("</h3>");
-                
-                html.append("<p style='font-size: 18px; color: #1976d2; margin: 10px 0;'><strong>Price: $").append(formatCurrency(item.getBookValue())).append(" per unit</strong></p>");
-                html.append("<p style='margin: 5px 0;'><strong>Item ID:</strong> ").append(escapeHtml(item.getId())).append("</p>");
-                html.append("<p style='margin: 5px 0;'><strong>Available Quantity:</strong> ").append(item.getAvailableQuantity()).append(" units</p>");
-                
-                if (item.getSpecifications() != null && !item.getSpecifications().isEmpty()) {
-                    html.append("<p style='margin: 10px 0 5px 0;'><strong>Key Features:</strong></p>");
-                    html.append("<ul style='margin: 5px 0;'>");
-                    int specCount = 0;
-                    for (Map.Entry<String, String> spec : item.getSpecifications().entrySet()) {
-                        if (!spec.getKey().equals("subtype") && specCount < 3) { // Limit to 3 specs
-                            html.append("<li><strong>").append(escapeHtml(formatSpecKey(spec.getKey()))).append(":</strong> ")
-                                .append(escapeHtml(spec.getValue())).append("</li>");
-                            specCount++;
-                        }
-                    }
-                    html.append("</ul>");
-                }
-                
-                html.append("<p style='margin: 10px 0; padding: 8px; background-color: #e3f2fd; border-radius: 4px; font-size: 14px;'>");
-                html.append("<strong>💬 Why this suggestion:</strong> This item has a ").append(matchPercentage);
-                html.append("% semantic similarity to your request, making it a relevant alternative.");
-                html.append("</p>");
-                
-                html.append("</div>");
-            }
-            
-            if (similarCount > 0) {
-                html.append("</div>");
-                html.append("<p style='color: #616161; font-size: 14px; font-style: italic;'>");
-                html.append("These suggestions are powered by AI semantic search to help you find the best match for your needs.");
-                html.append("</p>");
-            }
-        }
-        
-        html.append("<p>Best regards,<br>Procurement Automation System</p>");
-        html.append("</body></html>");
-        
-        return html.toString();
-    }
-    
-    /**
-     * Builds the HTML body for new purchase confirmation email (no inventory match).
-     *
-     * @param request the procurement request
-     * @return the HTML email body
-     */
-    private String buildNewPurchaseConfirmationEmailBody(com.procurement.email.model.ProcurementRequest request) {
-        StringBuilder html = new StringBuilder();
-        html.append("<html><body>");
-        html.append("<h2>Procurement Request - New Purchase Required</h2>");
-        html.append("<p>Dear Requester,</p>");
-        
-        html.append("<div style='background-color: #e3f2fd; padding: 15px; border-left: 4px solid #2196f3; margin: 15px 0;'>");
-        html.append("<p style='margin: 5px 0;'><strong>Your Request:</strong></p>");
-        html.append("<p style='margin: 5px 0;'>Item: <strong>").append(escapeHtml(request.getItemName() != null ? request.getItemName() : request.getItemType())).append("</strong></p>");
-        html.append("<p style='margin: 5px 0;'>Quantity: <strong>").append(request.getQuantity()).append("</strong></p>");
-        if (request.getSpecifications() != null && !request.getSpecifications().isEmpty()) {
-            html.append("<p style='margin: 10px 0 5px 0;'><strong>Specifications:</strong></p>");
-            html.append("<ul style='margin: 5px 0;'>");
-            for (Map.Entry<String, String> entry : request.getSpecifications().entrySet()) {
-                html.append("<li><strong>").append(escapeHtml(formatSpecKey(entry.getKey()))).append(":</strong> ")
-                    .append(escapeHtml(entry.getValue())).append("</li>");
-            }
-            html.append("</ul>");
-        }
-        html.append("</div>");
-        
-        html.append("<p>We checked our inventory and didn't find an exact match for your request.</p>");
-        html.append("<p><strong>We will proceed with purchasing a new item from our vendors.</strong></p>");
-        
-        html.append("<div style='background-color: #fff3cd; padding: 15px; border-left: 4px solid #ffc107; margin: 20px 0;'>");
-        html.append("<p style='margin: 0;'><strong>To confirm and proceed:</strong></p>");
-        html.append("<p style='margin: 10px 0;'>Simply <strong>reply to this email</strong> with \"<strong>Confirm</strong>\" or \"<strong>Yes, proceed</strong>\"</p>");
-        html.append("<p style='margin: 5px 0;'>We'll get quotes from vendors and process your order.</p>");
-        html.append("</div>");
-        
-        html.append("<p>Best regards,<br>Procurement Automation System</p>");
-        html.append("</body></html>");
-        
-        return html.toString();
-    }
+        WorkflowDto workflowDto = new WorkflowDto();
 
-    /**
-     * Builds the HTML body for confirmation email.
-     *
-     * @param po the purchase order
-     * @return the HTML email body
-     */
-    private String buildConfirmationEmailBody(PurchaseOrder po) {
-        StringBuilder html = new StringBuilder();
-        html.append("<html><body>");
-        html.append("<h2>✓ Procurement Request Confirmed</h2>");
-        html.append("<p>Dear ").append(escapeHtml(po.getRequesterEmail())).append(",</p>");
-        html.append("<p>Great news! Your procurement request has been successfully processed and approved.</p>");
-        html.append("<br>");
-        
-        html.append("<div style='background-color: #e8f5e9; padding: 15px; border-left: 4px solid #4caf50; margin: 15px 0;'>");
-        html.append("<h3 style='margin-top: 0;'>Order Summary</h3>");
-        html.append("<p style='font-size: 18px; margin: 5px 0;'><strong>").append(escapeHtml(po.getItemName())).append("</strong></p>");
-        html.append("<p style='margin: 5px 0;'>Quantity: <strong>").append(po.getQuantity()).append("</strong></p>");
-        html.append("<p style='margin: 5px 0;'>Total Amount: <strong>$").append(formatCurrency(po.getAmount())).append("</strong></p>");
-        html.append("</div>");
-        
-        if (po.getSpecifications() != null && !po.getSpecifications().isEmpty()) {
-            html.append("<h3>Item Specifications</h3>");
-            html.append("<table border='0' cellpadding='5' cellspacing='0' style='margin-left: 20px;'>");
-            for (Map.Entry<String, String> entry : po.getSpecifications().entrySet()) {
-                // Skip the generic "type" field if it's redundant
-                if (entry.getKey().equals("type") && entry.getValue().equals(po.getItemType())) {
-                    continue;
-                }
-                html.append("<tr>");
-                html.append("<td style='padding-right: 20px;'><strong>").append(escapeHtml(formatSpecKey(entry.getKey()))).append(":</strong></td>");
-                html.append("<td>").append(escapeHtml(entry.getValue())).append("</td>");
-                html.append("</tr>");
-            }
-            html.append("</table>");
-            html.append("<br>");
-        }
-        
-        html.append("<h3>Purchase Order Details</h3>");
-        html.append("<table border='0' cellpadding='5' cellspacing='0' style='margin-left: 20px;'>");
-        html.append("<tr><td style='padding-right: 20px;'><strong>PO Number:</strong></td><td>").append(escapeHtml(po.getPoNumber())).append("</td></tr>");
-        html.append("<tr><td style='padding-right: 20px;'><strong>Status:</strong></td><td><span style='color: #ff9800;'>").append(escapeHtml(po.getStatus())).append("</span></td></tr>");
-        html.append("<tr><td style='padding-right: 20px;'><strong>Order Date:</strong></td><td>").append(po.getCreatedAt().format(DATE_FORMATTER)).append("</td></tr>");
-        html.append("<tr><td style='padding-right: 20px;'><strong>Estimated Delivery:</strong></td><td>5-7 business days</td></tr>");
-        html.append("</table>");
-        html.append("<br>");
-        
-        html.append("<div style='background-color: #fff3cd; padding: 15px; border-left: 4px solid #ffc107; margin: 15px 0;'>");
-        html.append("<p style='margin: 0;'><strong>Next Steps:</strong></p>");
-        html.append("<ul style='margin: 10px 0;'>");
-        html.append("<li>Your order is being processed by the procurement team</li>");
-        html.append("<li>You will receive updates via email as the order progresses</li>");
-        html.append("<li>For urgent inquiries, reference PO Number: <strong>").append(escapeHtml(po.getPoNumber())).append("</strong></li>");
-        html.append("</ul>");
-        html.append("</div>");
-        
-        html.append("<p>Thank you for using the Procurement Automation System!</p>");
-        html.append("<p>Best regards,<br>Procurement Team</p>");
-        html.append("</body></html>");
-        
-        return html.toString();
-    }
-    
-    /**
-     * Formats specification keys to be more readable.
-     * Converts "ram" to "RAM", "screen_size" to "Screen Size", etc.
-     */
-    private String formatSpecKey(String key) {
-        if (key == null || key.isEmpty()) {
-            return key;
-        }
-        
-        // Handle common abbreviations
-        if (key.equalsIgnoreCase("ram") || key.equalsIgnoreCase("cpu") || 
-            key.equalsIgnoreCase("gpu") || key.equalsIgnoreCase("ssd")) {
-            return key.toUpperCase();
-        }
-        
-        // Replace underscores with spaces and capitalize words
-        String[] words = key.replace("_", " ").split(" ");
-        StringBuilder result = new StringBuilder();
-        for (String word : words) {
-            if (result.length() > 0) {
-                result.append(" ");
-            }
-            if (word.length() > 0) {
-                result.append(Character.toUpperCase(word.charAt(0)));
-                if (word.length() > 1) {
-                    result.append(word.substring(1).toLowerCase());
-                }
-            }
-        }
-        return result.toString();
-    }
+        workflowDto.setAction("start");
+        workflowDto.setKey("ProcurementAutomation");
+        workflowDto.setRef(po.getPoNumber());
 
-    /**
-     * Builds the HTML body for error email.
-     *
-     * @param errorMessage the error message
-     * @return the HTML email body
-     */
-    private String buildErrorEmailBody(String errorMessage) {
-        StringBuilder html = new StringBuilder();
-        html.append("<html><body>");
-        html.append("<h2>Procurement Request - Processing Error</h2>");
-        html.append("<p>Dear Requester,</p>");
-        html.append("<p>We encountered an error while processing your procurement request.</p>");
-        html.append("<br>");
-        html.append("<div style='background-color: #ffebee; padding: 15px; border-left: 4px solid #f44336;'>");
-        html.append("<strong>Error Details:</strong><br>");
-        html.append(escapeHtml(errorMessage));
-        html.append("</div>");
-        html.append("<br>");
-        html.append("<p>Please try submitting your request again or contact the procurement team for assistance.</p>");
-        html.append("<p>Best regards,<br>Procurement Automation System</p>");
-        html.append("</body></html>");
-        
-        return html.toString();
-    }
 
-    /**
-     * Builds the HTML body for registration request email.
-     *
-     * @return the HTML email body
-     */
-    private String buildRegistrationRequestEmailBody() {
-        StringBuilder html = new StringBuilder();
-        html.append("<html><body>");
-        html.append("<h2>Procurement System - Registration Required</h2>");
-        html.append("<p>Dear User,</p>");
-        html.append("<p>We received a procurement request from your email address, but we could not find your profile in our system.</p>");
-        html.append("<br>");
-        html.append("<p><strong>To process your procurement requests, please register in the system:</strong></p>");
-        html.append("<ol>");
-        html.append("<li>Contact your system administrator</li>");
-        html.append("<li>Request access to the Procurement System</li>");
-        html.append("<li>Complete your user profile with role and designation information</li>");
-        html.append("</ol>");
-        html.append("<br>");
-        html.append("<p>Once registered, you will be able to submit procurement requests through email.</p>");
-        html.append("<p>Best regards,<br>Procurement Automation System</p>");
-        html.append("</body></html>");
-        
-        return html.toString();
-    }
 
-    /**
-     * Formats specifications map as HTML list.
-     *
-     * @param specifications the specifications map
-     * @return formatted HTML string
-     */
-    private String formatSpecifications(Map<String, String> specifications) {
-        if (specifications == null || specifications.isEmpty()) {
-            return "N/A";
-        }
-        
-        StringBuilder sb = new StringBuilder();
-        sb.append("<ul style='margin: 0; padding-left: 20px;'>");
-        for (Map.Entry<String, String> entry : specifications.entrySet()) {
-            sb.append("<li>").append(escapeHtml(entry.getKey())).append(": ")
-              .append(escapeHtml(entry.getValue())).append("</li>");
-        }
-        sb.append("</ul>");
-        return sb.toString();
-    }
 
-    /**
-     * Formats currency value.
-     *
-     * @param value the BigDecimal value
-     * @return formatted currency string
-     */
-    private String formatCurrency(BigDecimal value) {
-        if (value == null) {
-            return "0.00";
-        }
-        return String.format("%.2f", value);
-    }
+        TaskPerformRequest taskPerformRequest = new TaskPerformRequest();
+        taskPerformRequest.setModule("proc");
+        taskPerformRequest.setKey(workflowDto.getKey());
+        taskPerformRequest.setTitle(workflowDto.getTitle());
+        taskPerformRequest.setRef(workflowDto.getRef());
+        taskPerformRequest.setAction(new Action(workflowDto.getAction()));
 
-    /**
-     * Escapes HTML special characters.
-     *
-     * @param text the text to escape
-     * @return escaped text
-     */
-    private String escapeHtml(String text) {
-        if (text == null) {
-            return "";
-        }
-        return text.replace("&", "&amp;")
-                   .replace("<", "&lt;")
-                   .replace(">", "&gt;")
-                   .replace("\"", "&quot;")
-                   .replace("'", "&#39;");
-    }
+        try {
+            businessProcessAutomationClient.perform(token,taskPerformRequest, workflowDto);
 
-    /**
-     * Custom exception for email delivery failures.
-     */
-    public static class EmailDeliveryException extends RuntimeException {
-        public EmailDeliveryException(String message, Throwable cause) {
-            super(message, cause);
+        } catch (InvocationTargetException e) {
+          throw new RuntimeException(e);
+        } catch (NoSuchMethodException e) {
+          throw new RuntimeException(e);
+        } catch (IllegalAccessException e) {
+          throw new RuntimeException(e);
+        } catch (InstantiationException e) {
+          throw new RuntimeException(e);
         }
+
+
     }
 }

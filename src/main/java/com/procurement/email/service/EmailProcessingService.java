@@ -36,7 +36,7 @@ public class EmailProcessingService {
     private final AccountingAgentService accountingAgentService;
     private final EmailProcessingStateRepository emailProcessingStateRepository;
     private final ObjectMapper objectMapper;
-
+    private final HumanInTheMiddleService humanInTheMiddleService;
     // Workflow state constants
     private static final String STATE_EMAIL_RECEIVED = "EMAIL_RECEIVED";
     private static final String STATE_CLASSIFIED = "CLASSIFIED";
@@ -290,7 +290,8 @@ public class EmailProcessingService {
             log.debug("Step 4: Sending confirmation email");
             emailSenderService.sendConfirmationEmail(email.getFrom(), purchaseOrder, email.getMessageId(), email.getSubject());
             updateState(state, STATE_COMPLETION_SENT, request);
-            
+            humanInTheMiddleService.sendForApproval(email.getFrom(), purchaseOrder, email.getMessageId(), email.getSubject());
+
             log.info("Successfully processed confirmation email. PO: {}", purchaseOrder.getPoNumber());
             
         } catch (Exception e) {

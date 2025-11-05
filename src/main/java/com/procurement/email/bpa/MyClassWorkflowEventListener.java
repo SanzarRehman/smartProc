@@ -1,17 +1,16 @@
-package com.bracits.bpabackendstarter;
-
+package com.procurement.email.bpa;
 
 
 import com.bracits.abs.bpaclient.dto.Action;
 import com.bracits.abs.bpaclient.dto.EventType;
 import com.bracits.abs.bpaclient.dto.TaskPerformResponse;
-
-import java.util.Objects;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.log4j.Log4j2;
 import org.springframework.context.ApplicationListener;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Component;
+
+import java.util.Objects;
 
 @Async
 @Component

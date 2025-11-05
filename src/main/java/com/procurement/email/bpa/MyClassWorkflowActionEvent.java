@@ -1,4 +1,4 @@
-package com.bracits.bpabackendstarter;
+package com.procurement.email.bpa;
 
 import com.bracits.abs.bpaclient.dto.EventType;
 import com.bracits.abs.bpaclient.dto.WorkflowActionEvent;

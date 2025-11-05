@@ -52,5 +52,5 @@ echo ""
 echo "Starting application..."
 echo ""
 
-# Run the application
-mvn spring-boot:run
+# Run the application with Gradle
+./gradlew bootRun
