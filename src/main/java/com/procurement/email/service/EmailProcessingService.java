@@ -62,174 +62,174 @@ public class EmailProcessingService {
     public void processIncomingEmail(EmailMessage email) {
         log.info("Processing incoming email from: {}, subject: {}", email.getFrom(), email.getSubject());
 
-
-        boolean isReply = isConfirmationEmail(email);
+        // STEP 1: Determine PO number - use existing if reply, generate new if not
         String poNumber = null;
-        if (isReply) {
+        boolean isReply = false;
+        
+        // Check if this is a reply to an existing thread
+        if (email.getInReplyTo() != null && !email.getInReplyTo().isEmpty()) {
+            log.debug("Email is a reply, looking for existing thread with In-Reply-To: {}", email.getInReplyTo());
             poNumber = emailCleaningService.getExistingPoNumberIfExists(email);
+            
+            if (poNumber != null) {
+                log.info("Found existing thread with PO number: {}", poNumber);
+                isReply = true;
+            } else {
+                log.debug("No existing thread found for reply, will generate new PO number");
+            }
+        }
+        
+        // Generate new PO number if not found
+        if (poNumber == null) {
+            poNumber = generatePoNumber();
+            log.info("Generated new PO number {} for email {}", poNumber, email.getMessageId());
+        }
 
-            if (poNumber == null) {
+        EmailProcessingState state = null;
 
-                log.warn("No existing PO number found for reply email from: {}", email.getFrom());
+        try {
+            Optional<UserContext> userContextOpt = getUserContext(email.getFrom());
+            if (userContextOpt.isEmpty()) {
+                log.warn("Unauthorized procurement attempt from: {}", email.getFrom());
                 emailSenderService.sendErrorEmail(email.getFrom(),
-                    "We could not find your original procurement request. Please submit a new request.",
-                    email.getInReplyTo(), null);
-                return;
-            }
-            else
-            {
-                poNumber = generatePoNumber();
-            }
-
-            // STEP 1: Generate PO number immediately for tracking
-
-            log.info("Generated PO number {} for email {}", poNumber, email.getMessageId());
-
-
-            EmailProcessingState state = null;
-
-
-            try {
-                Optional<UserContext> userContextOpt = getUserContext(email.getFrom());
-                if (userContextOpt.isEmpty()) {
-                    log.warn("Unauthorized procurement attempt from: {}", email.getFrom());
-                    emailSenderService.sendErrorEmail(email.getFrom(),
                         "We couldn't find your account in the procurement system. Please register before submitting requests.",
                         email.getMessageId(), poNumber);
-                    return;
-                }
-                // STEP 2: Classify email intent
-                GeminiEmailIntentResponse intent = geminiAIService.analyzeEmailIntent(email);
-
-                // STEP 3: Save email thread regardless of procurement status
-                boolean isProcurement = intent.isProcurementRelated();
-                String processingState = isProcurement ? STATE_CLASSIFIED : STATE_NOT_PROCUREMENT;
-                if(isReply)
-                {
-
-                }
-                else
-                {
-                    emailCleaningService.saveEmailThread(email, poNumber, isProcurement, processingState);
-                }
-                log.info("Saved email thread with PO number {} and state {}", poNumber, processingState);
-
-                UserContext userContext = userContextOpt.get();
-                if (!isReply) {
-                    humanInTheMiddleService.startProcess(email.getFrom(), poNumber, email.getMessageId(), email.getSubject(), userContext.getUsername(), false);
-                    humanInTheMiddleService.perform(email.getFrom(), poNumber, email.getMessageId(), email.getSubject(), userContext.getUsername(), false, "send");
-                } else {
-                    humanInTheMiddleService.perform(email.getFrom(), poNumber, email.getMessageId(), email.getSubject(), userContext.getUsername(), false, "send");
-                }
-                if (!intent.isProcurementRelated()) {
-                    log.info("Email is not procurement-related. Saved with PO number {} for tracking.", poNumber);
-                    // Still save the processing state for non-procurement emails
-                    state = createInitialStateWithPoNumber(email, poNumber);
-                    updateState(state, STATE_NOT_PROCUREMENT, null);
-                    humanInTheMiddleService.perform(email.getFrom(), poNumber, email.getMessageId(), email.getSubject(), userContext.getUsername(), false, "send");
-                    return;
-                }
-
-                if (intent.getIntentType() == GeminiEmailIntentResponse.IntentType.REPLY_CONFIRMATION) {
-                    log.debug("Detected confirmation reply. Delegating to confirmation workflow for message {}", email.getMessageId());
-                    processConfirmationEmail(email, poNumber);
-                    return;
-                }
-
-                if (intent.getIntentType() == GeminiEmailIntentResponse.IntentType.REPLY_INFORMATION) {
-                    log.info("Reply {} contains additional details; continuing through intake flow instead of confirmation handling.", email.getMessageId());
-                } else if (intent.isReply()) {
-                    log.debug("Detected reply without new details. Delegating to confirmation workflow for message {}", email.getMessageId());
-                    processConfirmationEmail(email, poNumber);
-                    return;
-                }
-
-                if (!intent.isHasAllDetails() || intent.getIntentType() == GeminiEmailIntentResponse.IntentType.NEW_REQUEST_MISSING_DETAILS) {
-                    log.warn("New procurement email missing critical details. Requesting additional information.");
-                    List<String> missing = intent.getMissingDetails();
-                    if (missing == null || missing.isEmpty()) {
-                        missing = List.of("Item Type", "Quantity");
-                    }
-                    emailSenderService.sendTemplateGuideEmail(email.getFrom(), missing, email.getMessageId(), email.getSubject(), poNumber);
-                    humanInTheMiddleService.perform(email.getFrom(), poNumber, email.getMessageId(), email.getSubject(), "service", false, "send");
-                    return;
-                }
-
-                state = createInitialStateWithPoNumber(email, poNumber);
-                updateState(state, STATE_CLASSIFIED, null);
-
-                EmailMessage cleanedEmail = createCleanedEmailCopy(email);
-                TemplateValidationResult validationResult = validateProcurementOrFallback(cleanedEmail, email, poNumber);
-                if (!validationResult.isValid()) {
-                    updateState(state, "TEMPLATE_INVALID", null);
-                    return;
-                }
-
-                log.debug("Extracting procurement request details");
-                ProcurementRequest request = extractRequestDetails(cleanedEmail);
-                request.setPoNumber(poNumber); // Set PO number for tracking
-
-                log.debug("Loading available inventory for Gemini matching");
-                List<Item> allInventory = inventoryService.listAllAvailableItems();
-                GeminiInventoryMatchResponse matchResponse = geminiAIService.matchInventoryItems(request, allInventory);
-                List<Item> matchedItems = inventoryService.getItemsByIds(matchResponse.getMatchingItemIds());
-
-                if (!matchedItems.isEmpty()) {
-                    request.setCandidateItemIds(matchResponse.getMatchingItemIds());
-                    log.info("Gemini identified {} candidate inventory items", matchedItems.size());
-                } else {
-                    request.setCandidateItemIds(Collections.emptyList());
-                    log.info("Gemini did not find matching inventory items: {}", matchResponse.getReasoning());
-                }
-                state.setProcurementRequestId(request.getRequestId());
-                updateState(state, STATE_CONTEXT_GATHERED, request);
-
-                List<Item> availableItems;
-                if (!matchedItems.isEmpty()) {
-                    availableItems = matchedItems;
-                } else {
-                    log.debug("Checking inventory for available items via fallback search");
-                    availableItems = checkInventory(request);
-                }
-                updateState(state, STATE_INVENTORY_CHECKED, request);
-
-                List<Item> itemsToRecommend = availableItems;
-                if (!availableItems.isEmpty()) {
-                    log.debug("Requesting Gemini recommendations with matched inventory context");
-                    List<Item> recommendedItems = getRecommendations(request, userContext, availableItems);
-                    if (!recommendedItems.isEmpty()) {
-                        itemsToRecommend = recommendedItems;
-                    } else {
-                        log.debug("Gemini returned no ranked recommendations; defaulting to matched inventory list.");
-                    }
-                }
-
-                // Use vector search to find similar products based on the request
-                log.debug("Searching for similar products using vector database");
-                Map<String, Float> similarProductsWithScores = getSimilarProducts(request);
-
-                if (!availableItems.isEmpty()) {
-                    sendRecommendations(email.getFrom(), itemsToRecommend, similarProductsWithScores, request, email.getMessageId(), email.getSubject());
-                } else {
-                    sendNewPurchaseConfirmation(email.getFrom(), request, email.getMessageId(), email.getSubject());
-                }
-                updateState(state, STATE_RECOMMENDATIONS_SENT, request);
-
-                log.info("Successfully processed incoming email. State: {}", state.getCurrentState());
-
-            } catch (AIAnalysisException e) {
-                log.error("AI analysis failed for email: {}", email.getMessageId(), e);
-                handleAIAnalysisError(email, state, e);
-            } catch (UserNotFoundException e) {
-                log.error("User not found: {}", email.getFrom(), e);
-                handleUserNotFoundError(email, state);
-            } catch (InventoryServiceException e) {
-                log.error("Inventory service error for email: {}", email.getMessageId(), e);
-                handleInventoryError(email, state, e);
-            } catch (Exception e) {
-                log.error("Unexpected error processing email: {}", email.getMessageId(), e);
-                handleGenericError(email, state, e);
+                return;
             }
+
+            UserContext userContext = userContextOpt.get();
+
+            // STEP 2: Classify email intent
+            GeminiEmailIntentResponse intent = geminiAIService.analyzeEmailIntent(email);
+
+            // STEP 3: Save email thread regardless of procurement status
+            boolean isProcurement = intent.isProcurementRelated();
+            String processingState = isProcurement ? STATE_CLASSIFIED : STATE_NOT_PROCUREMENT;
+            emailCleaningService.saveEmailThread(email, poNumber, isProcurement, processingState);
+            log.info("Saved email thread with PO number {} and state {}", poNumber, processingState);
+
+            // STEP 4: Start or continue workflow with human in the middle
+            if (!isReply) {
+                humanInTheMiddleService.startProcess(email.getFrom(), poNumber, email.getMessageId(), 
+                    email.getSubject(), userContext.getUsername(), false);
+                humanInTheMiddleService.perform(email.getFrom(), poNumber, email.getMessageId(), 
+                    email.getSubject(), userContext.getUsername(), false, "send");
+            } else {
+                humanInTheMiddleService.perform(email.getFrom(), poNumber, email.getMessageId(), 
+                    email.getSubject(), userContext.getUsername(), false, "send");
+            }
+
+            if (!intent.isProcurementRelated()) {
+                log.info("Email is not procurement-related. Saved with PO number {} for tracking.", poNumber);
+                // Still save the processing state for non-procurement emails
+                state = createInitialStateWithPoNumber(email, poNumber);
+                updateState(state, STATE_NOT_PROCUREMENT, null);
+                return;
+            }
+
+            if (intent.getIntentType() == GeminiEmailIntentResponse.IntentType.REPLY_CONFIRMATION) {
+                log.debug("Detected confirmation reply. Delegating to confirmation workflow for message {}", email.getMessageId());
+                processConfirmationEmail(email, poNumber);
+                return;
+            }
+
+            if (intent.getIntentType() == GeminiEmailIntentResponse.IntentType.REPLY_INFORMATION) {
+                log.info("Reply {} contains additional details; continuing through intake flow instead of confirmation handling.", email.getMessageId());
+            } else if (intent.isReply()) {
+                log.debug("Detected reply without new details. Delegating to confirmation workflow for message {}", email.getMessageId());
+                processConfirmationEmail(email, poNumber);
+                return;
+            }
+
+            if (!intent.isHasAllDetails() || intent.getIntentType() == GeminiEmailIntentResponse.IntentType.NEW_REQUEST_MISSING_DETAILS) {
+                log.warn("New procurement email missing critical details. Requesting additional information.");
+                List<String> missing = intent.getMissingDetails();
+                if (missing == null || missing.isEmpty()) {
+                    missing = List.of("Item Type", "Quantity");
+                }
+                emailSenderService.sendTemplateGuideEmail(email.getFrom(), missing, email.getMessageId(), email.getSubject(), poNumber);
+                humanInTheMiddleService.perform(email.getFrom(), poNumber, email.getMessageId(), email.getSubject(), "service", false, "send");
+                return;
+            }
+
+            state = createInitialStateWithPoNumber(email, poNumber);
+            updateState(state, STATE_CLASSIFIED, null);
+
+            EmailMessage cleanedEmail = createCleanedEmailCopy(email);
+            TemplateValidationResult validationResult = validateProcurementOrFallback(cleanedEmail, email, poNumber);
+            if (!validationResult.isValid()) {
+                updateState(state, "TEMPLATE_INVALID", null);
+                return;
+            }
+
+            log.debug("Extracting procurement request details");
+            ProcurementRequest request = extractRequestDetails(cleanedEmail);
+            request.setPoNumber(poNumber); // Set PO number for tracking
+
+            log.debug("Loading available inventory for Gemini matching");
+            List<Item> allInventory = inventoryService.listAllAvailableItems();
+            GeminiInventoryMatchResponse matchResponse = geminiAIService.matchInventoryItems(request, allInventory);
+            List<Item> matchedItems = inventoryService.getItemsByIds(matchResponse.getMatchingItemIds());
+
+            if (!matchedItems.isEmpty()) {
+                request.setCandidateItemIds(matchResponse.getMatchingItemIds());
+                log.info("Gemini identified {} candidate inventory items", matchedItems.size());
+            } else {
+                request.setCandidateItemIds(Collections.emptyList());
+                log.info("Gemini did not find matching inventory items: {}", matchResponse.getReasoning());
+            }
+            state.setProcurementRequestId(request.getRequestId());
+            updateState(state, STATE_CONTEXT_GATHERED, request);
+
+            List<Item> availableItems;
+            if (!matchedItems.isEmpty()) {
+                availableItems = matchedItems;
+            } else {
+                log.debug("Checking inventory for available items via fallback search");
+                availableItems = checkInventory(request);
+            }
+            updateState(state, STATE_INVENTORY_CHECKED, request);
+
+            List<Item> itemsToRecommend = availableItems;
+            if (!availableItems.isEmpty()) {
+                log.debug("Requesting Gemini recommendations with matched inventory context");
+                List<Item> recommendedItems = getRecommendations(request, userContext, availableItems);
+                if (!recommendedItems.isEmpty()) {
+                    itemsToRecommend = recommendedItems;
+                } else {
+                    log.debug("Gemini returned no ranked recommendations; defaulting to matched inventory list.");
+                }
+            }
+
+            // Use vector search to find similar products based on the request
+            log.debug("Searching for similar products using vector database");
+            Map<String, Float> similarProductsWithScores = getSimilarProducts(request);
+
+            if (!availableItems.isEmpty()) {
+                sendRecommendations(email.getFrom(), itemsToRecommend, similarProductsWithScores, request, email.getMessageId(), email.getSubject());
+                humanInTheMiddleService.perform(email.getFrom(), poNumber, email.getMessageId(),
+                    email.getSubject(), userContext.getUsername(), false, "send");
+            } else {
+                sendNewPurchaseConfirmation(email.getFrom(), request, email.getMessageId(), email.getSubject());
+                humanInTheMiddleService.perform(email.getFrom(), poNumber, email.getMessageId(),
+                    email.getSubject(), userContext.getUsername(), false, "send");
+            }
+            updateState(state, STATE_RECOMMENDATIONS_SENT, request);
+
+            log.info("Successfully processed incoming email. State: {}", state.getCurrentState());
+
+        } catch (AIAnalysisException e) {
+            log.error("AI analysis failed for email: {}", email.getMessageId(), e);
+            handleAIAnalysisError(email, state, e);
+        } catch (UserNotFoundException e) {
+            log.error("User not found: {}", email.getFrom(), e);
+            handleUserNotFoundError(email, state);
+        } catch (InventoryServiceException e) {
+            log.error("Inventory service error for email: {}", email.getMessageId(), e);
+            handleInventoryError(email, state, e);
+        } catch (Exception e) {
+            log.error("Unexpected error processing email: {}", email.getMessageId(), e);
+            handleGenericError(email, state, e);
         }
     }
 
@@ -327,6 +327,7 @@ public class EmailProcessingService {
                 }
 
                 log.info("Processing inventory allocation for item: {} ({})", selectedItem.getName(), selectedItem.getId());
+
                 inventoryService.decrementItemQuantity(selectedItem.getId(), request.getQuantity());
 
                 // Record inventory allocation in accounting
