@@ -11,6 +11,7 @@ import com.procurement.email.repository.EmailProcessingStateRepository;
 import com.procurement.email.service.GeminiAIService.AIAnalysisException;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.RandomStringUtils;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -60,7 +61,7 @@ public class EmailProcessingService {
      */
     @Transactional
     public void processIncomingEmail(EmailMessage email) {
-        log.info("Processing incoming email from: {}, subject: {}", email.getFrom(), email.getSubject());
+        log.info(" incomming Email ID" + email.getMessageId() );
 
         // STEP 1: Determine PO number - use existing if reply, generate new if not
         String poNumber = null;
@@ -250,8 +251,7 @@ public class EmailProcessingService {
      */
     @Transactional
     public void processConfirmationEmail(EmailMessage email,String poNumber) {
-        log.info("Processing confirmation email from: {}, subject: {}", email.getFrom(), email.getSubject());
-
+        log.info(" confirm incomming Email ID" + email.getMessageId() );
         EmailProcessingState state = null;
 
         try {
@@ -298,6 +298,8 @@ public class EmailProcessingService {
             log.debug("Step 2: Parsing confirmation response with Gemini");
             ConfirmationResponse confirmation = parseConfirmationResponse(email, request, candidateItems);
 
+            // Update the last message ID to the confirmation email (for threading)
+            state.setLastMessageId(email.getMessageId());
             updateState(state, STATE_CONFIRMATION_RECEIVED, null);
 
             if (!confirmation.isConfirmed() && isExplicitNewPurchase(confirmation.getUserReply())) {
@@ -314,11 +316,9 @@ public class EmailProcessingService {
                     return;
                 }
 
-            PurchaseOrder purchaseOrder;
-
             // Determine if item is from inventory or new purchase
             if (confirmation.isFromInventory()) {
-                log.debug("Step 3: Processing inventory allocation");
+                log.debug("Step 3: Processing inventory allocation - sending for approval");
                 Item selectedItem = confirmation.getSelectedItem();
 
                 if (selectedItem == null) {
@@ -326,37 +326,41 @@ public class EmailProcessingService {
                     throw new IllegalStateException("No item selected for inventory allocation");
                 }
 
-                log.info("Processing inventory allocation for item: {} ({})", selectedItem.getName(), selectedItem.getId());
+                log.info("Requesting approval for inventory allocation: item {} ({}) for user {}", 
+                         selectedItem.getName(), selectedItem.getId(), userContext.getUsername());
 
-                inventoryService.decrementItemQuantity(selectedItem.getId(), request.getQuantity());
-
-                // Record inventory allocation in accounting
-                accountingAgentService.recordInventoryAllocation(selectedItem, userContext);
-                updateState(state, STATE_ACCOUNTING_UPDATED, request);
-
-                // Generate PO for tracking purposes
-                purchaseOrder = procurementAgentService.generatePurchaseOrder(request, userContext, selectedItem);
+                // Generate PO for tracking purposes (before approval)
+                PurchaseOrder purchaseOrder = procurementAgentService.generatePurchaseOrder(request, userContext, selectedItem,poNumber);
                 state.setPoNumber(purchaseOrder.getPoNumber());
-                updateState(state, STATE_PO_GENERATED, request);
+                log.info(" human loop Email ID" + email.getMessageId() );
+                state.setLastMessageId(email.getMessageId()); // Ensure lastMessageId is set for threading
+                updateState(state, "PENDING_INVENTORY_APPROVAL", request);
+                
+                // Send for human approval
+                humanInTheMiddleService.perform(email.getFrom(), poNumber, email.getMessageId(),
+                    email.getSubject(), userContext.getUsername(), false, "inventory");
+                
+                log.info("Inventory allocation sent for approval. PO: {}, awaiting approval to update inventory & GL", poNumber);
+                return; // Stop here, will resume from workflow listener
 
             } else {
-                log.debug("Step 3: Processing new purchase");
-
-                // Generate purchase order
-                purchaseOrder = procurementAgentService.generatePurchaseOrder(request, userContext, null);
+                log.debug("Step 3: Processing new purchase - sending for approval");
+                
+                log.info("Requesting approval for new purchase for user {}", userContext.getUsername());
+                
+                // Generate purchase order (before approval)
+                PurchaseOrder purchaseOrder = procurementAgentService.generatePurchaseOrder(request, userContext, null,poNumber);
                 state.setPoNumber(purchaseOrder.getPoNumber());
-                updateState(state, STATE_PO_GENERATED, request);
-
-                // Record purchase transaction in accounting
-                accountingAgentService.recordPurchaseTransaction(purchaseOrder);
-                updateState(state, STATE_ACCOUNTING_UPDATED, request);
+                state.setLastMessageId(email.getMessageId()); // Ensure lastMessageId is set for threading
+                updateState(state, "PENDING_PROCUREMENT_APPROVAL", request);
+                
+                // Send for human approval
+                humanInTheMiddleService.perform(email.getFrom(), poNumber, email.getMessageId(),
+                    email.getSubject(), userContext.getUsername(), false, "proc");
+                
+                log.info("New purchase sent for approval. PO: {}, awaiting approval to update GL", poNumber);
+                return; // Stop here, will resume from workflow listener
             }
-
-            // Send confirmation email to requester
-            log.debug("Step 4: Sending confirmation email");
-            emailSenderService.sendConfirmationEmail(email.getFrom(), purchaseOrder, email.getMessageId(), email.getSubject());
-            updateState(state, STATE_COMPLETION_SENT, request);
-            log.info("Successfully processed confirmation email. PO: {}", purchaseOrder.getPoNumber());
 
         } catch (Exception e) {
             log.error("Error processing confirmation email: {}", email.getMessageId(), e);
@@ -403,20 +407,24 @@ public class EmailProcessingService {
         List<String> allPoNumbers = emailCleaningService.getAllPoNumbers();
 
         int maxNumber = allPoNumbers.stream()
-                .filter(po -> po != null && po.startsWith(prefix))
-                .map(po -> po.substring(prefix.length()))
-                .mapToInt(num -> {
-                    try {
-                        return Integer.parseInt(num);
-                    } catch (NumberFormatException e) {
-                        return 0;
-                    }
-                })
-                .max()
-                .orElse(0);
+            .filter(po -> po != null && po.startsWith(prefix))
+            .map(po -> po.substring(prefix.length(), Math.min(po.length(), prefix.length() + 4)))
+            .mapToInt(num -> {
+                try {
+                    return Integer.parseInt(num);
+                } catch (NumberFormatException e) {
+                    return 0;
+                }
+            })
+            .max()
+            .orElse(0);
 
-        int nextNumber = maxNumber + 1;
-        String newPoNumber = String.format("PO-%d-%04d", year, nextNumber);
+        int nextNumber = maxNumber + 10;
+
+        // Generate random 3-character alphanumeric suffix
+        String randomSuffix = RandomStringUtils.randomAlphanumeric(3).toUpperCase();
+
+        String newPoNumber = String.format("PO-%d-%04d-%s", year, nextNumber, randomSuffix);
 
         log.info("Generated new PO number: {} (previous max: {})", newPoNumber, maxNumber);
         return newPoNumber;
@@ -921,6 +929,208 @@ public class EmailProcessingService {
                 email.getMessageId(), poNumber);
         } catch (Exception emailError) {
             log.error("Failed to send error email", emailError);
+        }
+    }
+
+    /**
+     * Resumes inventory allocation processing after approval.
+     * Called from MyClassWorkflowEventListener when approved_for_inventory action is received.
+     */
+    @Transactional
+    public void resumeInventoryAllocation(String poNumber) {
+        log.info("Resuming inventory allocation for PO: {}", poNumber);
+        
+        try {
+            // Get processing state
+            log.debug("Looking for processing state with PO number: '{}'", poNumber);
+            
+            Optional<EmailProcessingState> stateOpt = emailProcessingStateRepository.findByPoNumber(poNumber);
+            if (stateOpt.isEmpty()) {
+                // Try to find all states and log them for debugging
+                List<EmailProcessingState> allStates = emailProcessingStateRepository.findAll();
+                log.error("No processing state found for PO: {}. Total states in DB: {}", poNumber, allStates.size());
+                allStates.stream()
+                    .filter(s -> s.getPoNumber() != null)
+                    .forEach(s -> log.debug("Found state with PO: '{}' (length: {})", s.getPoNumber(), s.getPoNumber().length()));
+                throw new IllegalStateException("No processing state found for PO: " + poNumber);
+            }
+            
+            EmailProcessingState state = stateOpt.get();
+            
+            if (!"PENDING_INVENTORY_APPROVAL".equals(state.getCurrentState())) {
+                log.warn("PO {} is not in PENDING_INVENTORY_APPROVAL state: {}", poNumber, state.getCurrentState());
+                return;
+            }
+            
+            // Deserialize request from state
+            ProcurementRequest request = extractRequestFromState(state);
+            
+            // Get user context
+            UserContext userContext = getUserContext(state.getRequesterEmail())
+                    .orElseThrow(() -> new UserNotFoundException("User not found: " + state.getRequesterEmail()));
+            
+            // Retrieve the PurchaseOrder to get the selected item information
+            log.debug("Retrieving PurchaseOrder for PO: {}", poNumber);
+            Optional<PurchaseOrder> poOpt = procurementAgentService.getPurchaseOrderByPoNumber(poNumber);
+            if (poOpt.isEmpty()) {
+                throw new IllegalStateException("PurchaseOrder not found for PO: " + poNumber);
+            }
+            
+            PurchaseOrder purchaseOrder = poOpt.get();
+            
+            // Get the item from the PO's item name or specifications
+            log.debug("Getting selected item from PurchaseOrder - ItemName: {}", purchaseOrder.getItemName());
+            String itemName = purchaseOrder.getItemName();
+            
+            // Find the item in inventory
+            Item selectedItem = null;
+            if (request.getCandidateItemIds() != null && !request.getCandidateItemIds().isEmpty()) {
+                // Try to find from candidate items first
+                for (String itemId : request.getCandidateItemIds()) {
+                    Item item = inventoryService.getItemById(itemId);
+                    if (item != null && item.getName().equalsIgnoreCase(itemName)) {
+                        selectedItem = item;
+                        break;
+                    }
+                }
+            }
+            
+            // If not found in candidates, search by name in all inventory
+            if (selectedItem == null) {
+                log.debug("Item not found in candidates, searching all inventory for: {}", itemName);
+                List<Item> allItems = inventoryService.listAllAvailableItems();
+                for (Item item : allItems) {
+                    if (item.getName().equalsIgnoreCase(itemName)) {
+                        selectedItem = item;
+                        break;
+                    }
+                }
+            }
+            
+            if (selectedItem == null) {
+                throw new IllegalStateException("Selected item not found in inventory for PO: " + poNumber + ", item: " + itemName);
+            }
+            
+            // Process inventory allocation (approved)
+            log.info("Approved: Allocating inventory item {} ({}) for user {}", 
+                     selectedItem.getName(), selectedItem.getId(), userContext.getUsername());
+            
+            // Step 1: Decrement inventory
+            inventoryService.decrementItemQuantity(selectedItem.getId(), request.getQuantity());
+            log.info("Inventory decremented for item {}", selectedItem.getId());
+            
+            // Step 2: Record in GL
+            accountingAgentService.recordInventoryAllocation(selectedItem, userContext,poOpt.get().getPoNumber());
+            updateState(state, STATE_ACCOUNTING_UPDATED, request);
+            log.info("GL entry recorded for inventory allocation");
+            
+            // Step 3: Update state to PO_GENERATED (PO was already created before approval)
+            updateState(state, STATE_PO_GENERATED, request);
+            log.info("Purchase order confirmed: {}", purchaseOrder.getPoNumber());
+            
+            // Step 4: Send confirmation email
+            String subject = request.getItemName() != null ? request.getItemName() : request.getItemType();
+            String inReplyToMessageId = state.getLastMessageId() != null ? state.getLastMessageId() : state.getEmailMessageId();
+            
+            log.info("Preparing to send confirmation email:");
+            log.info("  - To: {}", state.getRequesterEmail());
+            log.info("  - Subject: Re: {}", subject);
+            log.info("  - In-Reply-To: {} (from {})", inReplyToMessageId, state.getLastMessageId() != null ? "lastMessageId" : "emailMessageId");
+            log.info("  - State.lastMessageId: {}", state.getLastMessageId());
+            log.info("  - State.emailMessageId: {}", state.getEmailMessageId());
+            
+            emailSenderService.sendConfirmationEmail(
+                state.getRequesterEmail(), 
+                purchaseOrder, 
+                inReplyToMessageId, 
+                "Re: " + subject
+            );
+            updateState(state, STATE_COMPLETION_SENT, request);
+            log.info("Confirmation email sent to {} (in reply to: {})", state.getRequesterEmail(), inReplyToMessageId);
+            
+            log.info("✓ Successfully completed inventory allocation for PO: {}", poNumber);
+            
+        } catch (Exception e) {
+            log.error("Failed to resume inventory allocation for PO: {}", poNumber, e);
+            throw new RuntimeException("Failed to resume inventory allocation", e);
+        }
+    }
+
+    /**
+     * Resumes procurement processing after approval.
+     * Called from MyClassWorkflowEventListener when approved_for_procurement action is received.
+     */
+    @Transactional
+    public void resumeProcurement(String poNumber) {
+        log.info("Resuming procurement for PO: {}", poNumber);
+        
+        try {
+            // Get processing state
+            log.debug("Looking for processing state with PO number: '{}'", poNumber);
+            
+            Optional<EmailProcessingState> stateOpt = emailProcessingStateRepository.findByPoNumber(poNumber);
+            if (stateOpt.isEmpty()) {
+                // Try to find all states and log them for debugging
+                List<EmailProcessingState> allStates = emailProcessingStateRepository.findAll();
+                log.error("No processing state found for PO: {}. Total states in DB: {}", poNumber, allStates.size());
+                allStates.stream()
+                    .filter(s -> s.getPoNumber() != null)
+                    .forEach(s -> log.debug("Found state with PO: '{}' (length: {})", s.getPoNumber(), s.getPoNumber().length()));
+                throw new IllegalStateException("No processing state found for PO: " + poNumber);
+            }
+            
+            EmailProcessingState state = stateOpt.get();
+            
+            if (!"PENDING_PROCUREMENT_APPROVAL".equals(state.getCurrentState())) {
+                log.warn("PO {} is not in PENDING_PROCUREMENT_APPROVAL state: {}", poNumber, state.getCurrentState());
+                return;
+            }
+            
+            // Deserialize request from state
+            ProcurementRequest request = extractRequestFromState(state);
+            
+            // Get user context
+            UserContext userContext = getUserContext(state.getRequesterEmail())
+                    .orElseThrow(() -> new UserNotFoundException("User not found: " + state.getRequesterEmail()));
+            
+            // Retrieve the existing PurchaseOrder (it was created before approval)
+            log.debug("Retrieving existing PurchaseOrder for PO: {}", poNumber);
+            Optional<PurchaseOrder> poOpt = procurementAgentService.getPurchaseOrderByPoNumber(poNumber);
+            if (poOpt.isEmpty()) {
+                throw new IllegalStateException("PurchaseOrder not found for PO: " + poNumber);
+            }
+            
+            PurchaseOrder purchaseOrder = poOpt.get();
+            
+            // Process procurement (approved)
+            log.info("Approved: Processing new purchase for user {}", userContext.getUsername());
+            
+            // Step 1: Update state to PO_GENERATED (PO was already created, just updating state)
+            updateState(state, STATE_PO_GENERATED, request);
+            log.info("Purchase order confirmed: {}", purchaseOrder.getPoNumber());
+            
+            // Step 2: Record in GL
+            accountingAgentService.recordPurchaseTransaction(purchaseOrder);
+            updateState(state, STATE_ACCOUNTING_UPDATED, request);
+            log.info("GL entry recorded for new purchase");
+            
+            // Step 3: Send confirmation email
+            String subject = request.getItemName() != null ? request.getItemName() : request.getItemType();
+            String inReplyToMessageId = state.getLastMessageId() != null ? state.getLastMessageId() : state.getEmailMessageId();
+            emailSenderService.sendConfirmationEmail(
+                state.getRequesterEmail(), 
+                purchaseOrder, 
+                inReplyToMessageId, 
+                "Re: " + subject
+            );
+            updateState(state, STATE_COMPLETION_SENT, request);
+            log.info("Confirmation email sent to {} (in reply to: {})", state.getRequesterEmail(), inReplyToMessageId);
+            
+            log.info("✓ Successfully completed new purchase for PO: {}", poNumber);
+            
+        } catch (Exception e) {
+            log.error("Failed to resume procurement for PO: {}", poNumber, e);
+            throw new RuntimeException("Failed to resume procurement", e);
         }
     }
 

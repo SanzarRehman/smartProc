@@ -156,7 +156,7 @@ public class EmailPollerConfig {
     public MessageSource<EmailMessage> mailMessageSource(ImapMailReceiver imapMailReceiver) {
         return () -> {
             try {
-                log.debug("Polling for new emails...");
+
                 Object[] messages = imapMailReceiver.receive();
                 
                 if (messages != null && messages.length > 0) {
@@ -182,9 +182,6 @@ public class EmailPollerConfig {
                         
                         EmailMessage emailMessage = convertToEmailMessage(mimeMessage);
                         
-                        log.info("Converted email from {} with subject: {}", 
-                                emailMessage.getFrom(), emailMessage.getSubject());
-                        
                         return org.springframework.messaging.support.MessageBuilder
                                 .withPayload(emailMessage)
                                 .setHeader("messageId", emailMessage.getMessageId())
@@ -197,8 +194,6 @@ public class EmailPollerConfig {
                         return null;
                     }
                 }
-                
-                log.debug("No new emails found");
                 return null;
                 
             } catch (Exception e) {

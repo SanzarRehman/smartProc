@@ -48,15 +48,6 @@ public class IntegrationFlowConfig {
                 EmailMessage email = (EmailMessage) message.getPayload();
                 log.info("Service activator received incoming email from: {}", email.getFrom());
                 emailProcessingService.processIncomingEmail(email);
-
-                // Route to appropriate handler based on email type
-//                if (isConfirmationEmail(email)) {
-//                    log.debug("Email identified as confirmation, routing to confirmation handler");
-//                    emailProcessingService.processConfirmationEmail(email);
-//                } else {
-//                    log.debug("Email identified as new request, routing to incoming handler");
-//                    emailProcessingService.processIncomingEmail(email);
-//                }
                 
             } catch (Exception e) {
                 log.error("Error in incoming email handler", e);

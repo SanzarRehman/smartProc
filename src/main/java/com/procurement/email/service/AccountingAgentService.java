@@ -41,7 +41,7 @@ public class AccountingAgentService {
      * @param requester the user context of the requester
      */
     @Transactional
-    public void recordInventoryAllocation(Item item, UserContext requester) {
+    public void recordInventoryAllocation(Item item, UserContext requester,String poNumber) {
         log.info("Recording inventory allocation for item: {} to requester: {}", 
                 item.getName(), requester.getEmail());
         
@@ -52,7 +52,7 @@ public class AccountingAgentService {
         glEntry.setAccountDebit(ACCOUNT_FIXED_ASSETS);
         glEntry.setAccountCredit(ACCOUNT_INVENTORY);
         glEntry.setAmount(item.getBookValue());
-        glEntry.setReferenceNumber(allocationId);
+        glEntry.setReferenceNumber(poNumber);
         glEntry.setRequesterEmail(requester.getEmail());
         glEntry.setTransactionDate(LocalDateTime.now());
         glEntry.setDescription(String.format("Inventory allocation: %s (%s) to %s - Role: %s", 
@@ -62,9 +62,6 @@ public class AccountingAgentService {
                 requester.getRole()));
         
         generalLedgerEntryRepository.save(glEntry);
-        
-        // Update inventory quantity
-        inventoryService.decrementItemQuantity(item.getId(), 1);
         
         log.info("Successfully recorded inventory allocation GL entry with reference: {}", allocationId);
     }

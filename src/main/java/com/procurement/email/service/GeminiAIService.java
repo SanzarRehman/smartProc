@@ -27,6 +27,7 @@ public class GeminiAIService {
 
     private final RestTemplate geminiRestTemplate;
     private final String geminiApiUrl;
+    private final String openRouterModel;
     private final int maxRetries;
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
     private final GeminiRequestResponseLogger requestResponseLogger;
@@ -71,12 +72,14 @@ public class GeminiAIService {
     }
 
     public GeminiAIService(
-            @Qualifier("geminiRestTemplate") RestTemplate geminiRestTemplate,
-            @Value("${gemini.api.url}") String geminiApiUrl,
-            @Value("${gemini.api.max-retries:3}") int maxRetries,
+            @Qualifier("openRouterRestTemplate") RestTemplate openRouterRestTemplate,
+            @Value("${openrouter.api.url}") String openRouterApiUrl,
+            @Value("${openrouter.api.model}") String openRouterModel,
+            @Value("${openrouter.api.max-retries:3}") int maxRetries,
             GeminiRequestResponseLogger requestResponseLogger) {
-        this.geminiRestTemplate = geminiRestTemplate;
-        this.geminiApiUrl = geminiApiUrl;
+        this.geminiRestTemplate = openRouterRestTemplate;
+        this.geminiApiUrl = openRouterApiUrl;
+        this.openRouterModel = openRouterModel;
         this.maxRetries = maxRetries;
         this.requestResponseLogger = requestResponseLogger;
     }
@@ -949,13 +952,14 @@ public class GeminiAIService {
     }
 
     private Map<String, Object> buildGeminiRequest(String prompt) {
-        Map<String, Object> content = new HashMap<>();
-        Map<String, Object> part = new HashMap<>();
-        part.put("text", prompt);
-        content.put("parts", Collections.singletonList(part));
+        // OpenRouter uses messages array format like OpenAI
+        Map<String, Object> message = new HashMap<>();
+        message.put("role", "user");
+        message.put("content", prompt);
 
         Map<String, Object> request = new HashMap<>();
-        request.put("contents", Collections.singletonList(content));
+        request.put("messages", Collections.singletonList(message));
+        // Model will be added in postToGemini method
 
         return request;
     }
@@ -1278,11 +1282,14 @@ public class GeminiAIService {
     }
 
     private Map<String, Object> postToGemini(String operation, Map<String, Object> payload) {
-        String endpoint = geminiApiUrl + "/models/gemini-2.0-flash-exp:generateContent";
+        // OpenRouter uses chat completions format
         requestResponseLogger.logRequest(operation, payload);
         try {
+            // Add model to payload
+            payload.put("model", openRouterModel);
+            
             Map<String, Object> response = geminiRestTemplate.postForObject(
-                    endpoint, payload, Map.class);
+                    geminiApiUrl, payload, Map.class);
             requestResponseLogger.logResponse(operation, response);
             return response;
         } catch (RestClientException e) {
@@ -1293,19 +1300,23 @@ public class GeminiAIService {
 
     @SuppressWarnings("unchecked")
     private String extractTextFromGeminiResponse(Map<String, Object> response) {
-        List<Map<String, Object>> candidates = (List<Map<String, Object>>) response.get("candidates");
-        if (candidates == null || candidates.isEmpty()) {
-            throw new AIAnalysisException("No candidates in Gemini response");
+        // OpenRouter response format: {"choices": [{"message": {"content": "..."}}]}
+        List<Map<String, Object>> choices = (List<Map<String, Object>>) response.get("choices");
+        if (choices == null || choices.isEmpty()) {
+            throw new AIAnalysisException("No choices in OpenRouter response");
         }
 
-        Map<String, Object> content = (Map<String, Object>) candidates.get(0).get("content");
-        List<Map<String, Object>> parts = (List<Map<String, Object>>) content.get("parts");
-        
-        if (parts == null || parts.isEmpty()) {
-            throw new AIAnalysisException("No parts in Gemini response");
+        Map<String, Object> message = (Map<String, Object>) choices.get(0).get("message");
+        if (message == null) {
+            throw new AIAnalysisException("No message in OpenRouter response");
         }
 
-        return (String) parts.get(0).get("text");
+        String content = (String) message.get("content");
+        if (content == null || content.isEmpty()) {
+            throw new AIAnalysisException("No content in OpenRouter response");
+        }
+
+        return content;
     }
 
     private Optional<Item> findItemById(List<Item> items, String itemId) {

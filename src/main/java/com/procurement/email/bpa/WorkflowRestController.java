@@ -23,7 +23,7 @@ public class WorkflowRestController {
    * Perform workflow action.
    * add swagger for getting swagger documentation
    */
-  @PostMapping("/v1/workflow/perform")
+  @PostMapping("/proc/v1/workflow/perform")
 //  @Operation(summary = "Perform workflow action", description = "Perform workflow action",
 //      responses = {@ApiResponse(content = @Content(mediaType = "application/json",
 //          schema = @Schema(implementation = WorkflowDto.class)))

@@ -360,20 +360,30 @@ public class EmailCleaningService {
 
     /**
      * Check if an email already exists in the database, and return its PO number if found.
+     * This checks the In-Reply-To header to find the parent email's PO number.
      *
      * @param email the incoming email message
-     * @return the PO number if the email already exists, otherwise null
+     * @return the PO number if the parent email exists, otherwise null
      */
     @Transactional(readOnly = true)
     public String getExistingPoNumberIfExists(EmailMessage email) {
-        if (email == null || email.getMessageId() == null || email.getMessageId().isEmpty()) {
-            log.warn("Invalid email or missing messageId while checking for existing PO number");
+        if (email == null || email.getInReplyTo() == null || email.getInReplyTo().isEmpty()) {
+            log.debug("No In-Reply-To header found, this is a new thread");
             return null;
         }
 
-        return emailThreadRepository.findByMessageId(email.getInReplyTo())
-            .stream().map(e -> e.getPoNumber())
-            .findFirst().get();
+        log.debug("Looking for parent email with messageId: {}", email.getInReplyTo());
+        
+        Optional<EmailThread> parentThread = emailThreadRepository.findByMessageId(email.getInReplyTo());
+        
+        if (parentThread.isPresent()) {
+            String poNumber = parentThread.get().getPoNumber();
+            log.info("Found parent thread with PO number: {}", poNumber);
+            return poNumber;
+        }
+        
+        log.debug("No parent thread found for In-Reply-To: {}", email.getInReplyTo());
+        return null;
     }
 
 

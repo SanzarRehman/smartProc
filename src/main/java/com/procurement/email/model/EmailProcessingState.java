@@ -28,6 +28,9 @@ public class EmailProcessingState {
     @Column(name = "po_number")
     private String poNumber;
     
+    @Column(name = "last_message_id")
+    private String lastMessageId; // The most recent message ID in the thread (for reply threading)
+    
     @Column(name = "last_updated", nullable = false)
     private LocalDateTime lastUpdated;
     

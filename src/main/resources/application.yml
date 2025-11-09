@@ -57,12 +57,13 @@ keycloak:
   ssl-required: external
   public-client: false
 
-# Gemini API Configuration
-gemini:
+# OpenRouter AI API Configuration
+openrouter:
   api:
-    url: ${GEMINI_API_URL:https://generativelanguage.googleapis.com/v1beta}
-    key: ${GEMINI_API_KEY:}
-    timeout: 10000
+    url: ${OPENROUTER_API_URL:https://openrouter.ai/api/v1/chat/completions}
+    key: ${OPENROUTER_API_KEY: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}
+    model: ${OPENROUTER_MODEL:openai/gpt-4o-mini}
+    timeout: 30000
     max-retries: 3
 
 # Email Polling Configuration
@@ -103,4 +104,4 @@ logging:
     file: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
 bpaclient:
   events:
-    NameOfTheKey: com.procurement.email.bpa.MyClassWorkflowActionEvent
+    procurementAutomation: com.procurement.email.bpa.MyClassWorkflowActionEvent

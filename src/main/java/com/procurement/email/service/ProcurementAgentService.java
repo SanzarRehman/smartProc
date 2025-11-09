@@ -34,7 +34,7 @@ public class ProcurementAgentService {
      * @return the created PurchaseOrder
      */
     @Transactional
-    public PurchaseOrder generatePurchaseOrder(ProcurementRequest request, UserContext requester, Item selectedItem) {
+    public PurchaseOrder generatePurchaseOrder(ProcurementRequest request, UserContext requester, Item selectedItem,String poNumber) {
         log.info("Generating purchase order for requester: {}, item type: {}", 
                 requester.getEmail(), request.getItemType());
         
@@ -87,6 +87,7 @@ public class ProcurementAgentService {
         // Set timestamps and status
         purchaseOrder.setCreatedAt(LocalDateTime.now());
         purchaseOrder.setStatus("PENDING");
+        purchaseOrder.setPoNumber(poNumber);
         
         // Save to database
         PurchaseOrder savedPo = purchaseOrderRepository.save(purchaseOrder);
@@ -107,5 +108,16 @@ public class ProcurementAgentService {
         String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"));
         String uniqueId = UUID.randomUUID().toString().substring(0, 8).toUpperCase();
         return String.format("PO-%s-%s", timestamp, uniqueId);
+    }
+    
+    /**
+     * Retrieves a purchase order by PO number.
+     * 
+     * @param poNumber the PO number
+     * @return Optional containing the PurchaseOrder if found
+     */
+    public java.util.Optional<PurchaseOrder> getPurchaseOrderByPoNumber(String poNumber) {
+        log.debug("Looking up PurchaseOrder for PO: {}", poNumber);
+        return purchaseOrderRepository.findByPoNumber(poNumber);
     }
 }

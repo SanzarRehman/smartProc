@@ -6,8 +6,10 @@ import com.bracits.abs.bpaclient.dto.Action;
 import com.bracits.abs.bpaclient.dto.TaskAction;
 import com.bracits.abs.bpaclient.dto.TaskPerformRequest;
 import com.bracits.abs.bpaclient.dto.WorkflowDto;
+import jakarta.servlet.http.HttpServletRequest;
 import lombok.SneakyThrows;
 import lombok.extern.log4j.Log4j2;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 
@@ -24,6 +26,9 @@ public class WorkflowService {
     this.bpaClient = bpaClient;
   }
 
+
+  @Autowired
+  private HttpServletRequest request;
   /**
    * Start and remarks process.
    */
@@ -31,17 +36,23 @@ public class WorkflowService {
       throws InvocationTargetException, NoSuchMethodException, InstantiationException,
       IllegalAccessException {
 
-    TaskPerformRequest request = new TaskPerformRequest();
-    request.setModule("proc");
-    request.setKey(workflowDto.getKey());
-    request.setTitle(workflowDto.getTitle());
-    request.setRef(workflowDto.getRef());
-    request.setAction(new Action(workflowDto.getAction()));
-    if (workflowDto.getRemarks() != null && workflowDto.getRemarks().length() > 0) {
-      workflowDto.setRemarks(workflowDto.getRemarks());
-      request.setRemarks(workflowDto.getRemarks());
+    String token = request.getHeader("Authorization"); // ✅ get from incoming request
+    if (token == null || token.isBlank()) {
+      throw new RuntimeException("Missing Authorization header");
     }
-    bpaClient.perform("SecurityUtil.getHeaderJwt()", request, workflowDto);
+
+    TaskPerformRequest taskRequest = new TaskPerformRequest();
+    taskRequest.setModule("proc");
+    taskRequest.setKey(workflowDto.getKey());
+    taskRequest.setTitle(workflowDto.getTitle());
+    taskRequest.setRef(workflowDto.getRef());
+    taskRequest.setAction(new Action(workflowDto.getAction()));
+
+    if (workflowDto.getRemarks() != null && !workflowDto.getRemarks().isEmpty()) {
+      taskRequest.setRemarks(workflowDto.getRemarks());
+    }
+
+    bpaClient.perform(token, taskRequest, workflowDto);
     return HttpStatus.OK;
   }
 
