@@ -57,12 +57,12 @@ keycloak:
   ssl-required: external
   public-client: false
 
-# OpenRouter AI API Configuration
-openrouter:
+# Gemini AI API Configuration
+gemini:
   api:
-    url: ${OPENROUTER_API_URL:https://openrouter.ai/api/v1/chat/completions}
-    key: ${OPENROUTER_API_KEY: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}
-    model: ${OPENROUTER_MODEL:openai/gpt-4o-mini}
+    url: ${GEMINI_API_URL:https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent}
+    key: ${GEMINI_API_KEY:AIzaSyDarQqzvrJgaxVrgm-JPJO8bztLdHMdq6U}
+    model: ${GEMINI_MODEL:gemini-2.0-flash}
     timeout: 30000
     max-retries: 3
 

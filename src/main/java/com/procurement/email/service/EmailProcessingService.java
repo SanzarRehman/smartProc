@@ -39,6 +39,7 @@ public class EmailProcessingService {
     private final EmailCleaningService emailCleaningService;
     private final ObjectMapper objectMapper;
     private final HumanInTheMiddleService humanInTheMiddleService;
+    private final RRFService rrfService;
     // Workflow state constants
     private static final String STATE_EMAIL_RECEIVED = "EMAIL_RECEIVED";
     private static final String STATE_CLASSIFIED = "CLASSIFIED";
@@ -61,7 +62,7 @@ public class EmailProcessingService {
      */
     @Transactional
     public void processIncomingEmail(EmailMessage email) {
-        log.info(" incomming Email ID" + email.getMessageId() );
+        log.info("Processing incoming email from: {}, subject: {}", email.getFrom(), email.getSubject());
 
         // STEP 1: Determine PO number - use existing if reply, generate new if not
         String poNumber = null;
@@ -251,7 +252,8 @@ public class EmailProcessingService {
      */
     @Transactional
     public void processConfirmationEmail(EmailMessage email,String poNumber) {
-        log.info(" confirm incomming Email ID" + email.getMessageId() );
+        log.info("Processing confirmation email from: {}, subject: {}", email.getFrom(), email.getSubject());
+
         EmailProcessingState state = null;
 
         try {
@@ -332,9 +334,10 @@ public class EmailProcessingService {
                 // Generate PO for tracking purposes (before approval)
                 PurchaseOrder purchaseOrder = procurementAgentService.generatePurchaseOrder(request, userContext, selectedItem,poNumber);
                 state.setPoNumber(purchaseOrder.getPoNumber());
-                log.info(" human loop Email ID" + email.getMessageId() );
-                state.setLastMessageId(email.getMessageId()); // Ensure lastMessageId is set for threading
                 updateState(state, "PENDING_INVENTORY_APPROVAL", request);
+                
+                // Generate RRF with selected item information
+                rrfService.generateAndSaveRRF(poNumber, request, userContext, purchaseOrder.getAmount(), selectedItem);
                 
                 // Send for human approval
                 humanInTheMiddleService.perform(email.getFrom(), poNumber, email.getMessageId(),
@@ -351,7 +354,18 @@ public class EmailProcessingService {
                 // Generate purchase order (before approval)
                 PurchaseOrder purchaseOrder = procurementAgentService.generatePurchaseOrder(request, userContext, null,poNumber);
                 state.setPoNumber(purchaseOrder.getPoNumber());
-                state.setLastMessageId(email.getMessageId()); // Ensure lastMessageId is set for threading
+                
+                // Generate RRF document using LLM
+                try {
+                    log.info("Generating RRF document for new purchase, PO: {}", poNumber);
+                    // For new purchase, there's no selected item from inventory
+                    rrfService.generateAndSaveRRF(poNumber, request, userContext, purchaseOrder.getAmount(), null);
+                    log.info("RRF document generated successfully for PO: {}", poNumber);
+                } catch (Exception rrfError) {
+                    log.error("Failed to generate RRF document for PO: {}, continuing with approval", poNumber, rrfError);
+                    // Don't fail the entire process if RRF generation fails
+                }
+                
                 updateState(state, "PENDING_PROCUREMENT_APPROVAL", request);
                 
                 // Send for human approval
@@ -1031,14 +1045,6 @@ public class EmailProcessingService {
             // Step 4: Send confirmation email
             String subject = request.getItemName() != null ? request.getItemName() : request.getItemType();
             String inReplyToMessageId = state.getLastMessageId() != null ? state.getLastMessageId() : state.getEmailMessageId();
-            
-            log.info("Preparing to send confirmation email:");
-            log.info("  - To: {}", state.getRequesterEmail());
-            log.info("  - Subject: Re: {}", subject);
-            log.info("  - In-Reply-To: {} (from {})", inReplyToMessageId, state.getLastMessageId() != null ? "lastMessageId" : "emailMessageId");
-            log.info("  - State.lastMessageId: {}", state.getLastMessageId());
-            log.info("  - State.emailMessageId: {}", state.getEmailMessageId());
-            
             emailSenderService.sendConfirmationEmail(
                 state.getRequesterEmail(), 
                 purchaseOrder, 

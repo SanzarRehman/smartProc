@@ -86,6 +86,10 @@ dependencies {
 
     // JSoup for HTML parsing and email cleaning
     implementation 'org.jsoup:jsoup:1.17.1'
+    
+    // iText for PDF generation
+    implementation 'com.itextpdf:itext7-core:7.2.5'
+    implementation 'com.itextpdf:html2pdf:4.0.5'
 
     implementation 'com.bracits:bpa-client-spring-boot-starter:3.1.0.2-SNAPSHOT'
     // Testing

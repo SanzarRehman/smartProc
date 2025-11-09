@@ -72,14 +72,14 @@ public class GeminiAIService {
     }
 
     public GeminiAIService(
-            @Qualifier("openRouterRestTemplate") RestTemplate openRouterRestTemplate,
-            @Value("${openrouter.api.url}") String openRouterApiUrl,
-            @Value("${openrouter.api.model}") String openRouterModel,
-            @Value("${openrouter.api.max-retries:3}") int maxRetries,
+            @Qualifier("geminiRestTemplate") RestTemplate geminiRestTemplate,
+            @Value("${gemini.api.url}") String geminiApiUrl,
+            @Value("${gemini.api.model:gemini-1.5-flash}") String geminiModel,
+            @Value("${gemini.api.max-retries:3}") int maxRetries,
             GeminiRequestResponseLogger requestResponseLogger) {
-        this.geminiRestTemplate = openRouterRestTemplate;
-        this.geminiApiUrl = openRouterApiUrl;
-        this.openRouterModel = openRouterModel;
+        this.geminiRestTemplate = geminiRestTemplate;
+        this.geminiApiUrl = geminiApiUrl;
+        this.openRouterModel = geminiModel;
         this.maxRetries = maxRetries;
         this.requestResponseLogger = requestResponseLogger;
     }
@@ -952,14 +952,15 @@ public class GeminiAIService {
     }
 
     private Map<String, Object> buildGeminiRequest(String prompt) {
-        // OpenRouter uses messages array format like OpenAI
-        Map<String, Object> message = new HashMap<>();
-        message.put("role", "user");
-        message.put("content", prompt);
+        // Gemini uses contents array with parts format
+        Map<String, Object> part = new HashMap<>();
+        part.put("text", prompt);
+
+        Map<String, Object> content = new HashMap<>();
+        content.put("parts", Collections.singletonList(part));
 
         Map<String, Object> request = new HashMap<>();
-        request.put("messages", Collections.singletonList(message));
-        // Model will be added in postToGemini method
+        request.put("contents", Collections.singletonList(content));
 
         return request;
     }
@@ -1282,12 +1283,9 @@ public class GeminiAIService {
     }
 
     private Map<String, Object> postToGemini(String operation, Map<String, Object> payload) {
-        // OpenRouter uses chat completions format
+        // Gemini uses direct POST to generateContent endpoint
         requestResponseLogger.logRequest(operation, payload);
         try {
-            // Add model to payload
-            payload.put("model", openRouterModel);
-            
             Map<String, Object> response = geminiRestTemplate.postForObject(
                     geminiApiUrl, payload, Map.class);
             requestResponseLogger.logResponse(operation, response);
@@ -1300,29 +1298,70 @@ public class GeminiAIService {
 
     @SuppressWarnings("unchecked")
     private String extractTextFromGeminiResponse(Map<String, Object> response) {
-        // OpenRouter response format: {"choices": [{"message": {"content": "..."}}]}
-        List<Map<String, Object>> choices = (List<Map<String, Object>>) response.get("choices");
-        if (choices == null || choices.isEmpty()) {
-            throw new AIAnalysisException("No choices in OpenRouter response");
+        // Gemini response format: {"candidates": [{"content": {"parts": [{"text": "..."}]}}]}
+        List<Map<String, Object>> candidates = (List<Map<String, Object>>) response.get("candidates");
+        if (candidates == null || candidates.isEmpty()) {
+            throw new AIAnalysisException("No candidates in Gemini response");
         }
 
-        Map<String, Object> message = (Map<String, Object>) choices.get(0).get("message");
-        if (message == null) {
-            throw new AIAnalysisException("No message in OpenRouter response");
+        Map<String, Object> content = (Map<String, Object>) candidates.get(0).get("content");
+        if (content == null) {
+            throw new AIAnalysisException("No content in Gemini response");
         }
 
-        String content = (String) message.get("content");
-        if (content == null || content.isEmpty()) {
-            throw new AIAnalysisException("No content in OpenRouter response");
+        List<Map<String, Object>> parts = (List<Map<String, Object>>) content.get("parts");
+        if (parts == null || parts.isEmpty()) {
+            throw new AIAnalysisException("No parts in Gemini response");
         }
 
-        return content;
+        String text = (String) parts.get(0).get("text");
+        if (text == null || text.isEmpty()) {
+            throw new AIAnalysisException("No text in Gemini response");
+        }
+
+        return text;
     }
 
     private Optional<Item> findItemById(List<Item> items, String itemId) {
         return items.stream()
                 .filter(item -> item.getId().equals(itemId))
                 .findFirst();
+    }
+    
+    /**
+     * Generates a formal RRF (Request for Requisition) document using LLM.
+     *
+     * @param prompt The detailed prompt with all RRF information
+     * @return The formatted RRF document as a string
+     */
+    public String generateRRFDocument(String prompt) {
+        log.info("Generating RRF document using LLM");
+        
+        try {
+            // Add system context to the prompt for Gemini
+            String fullPrompt = "You are a professional document generator specializing in formal procurement and requisition documents. " +
+                    "Generate well-formatted, professional documents suitable for corporate use.\n\n" + prompt;
+            
+            Map<String, Object> requestBody = buildGeminiRequest(fullPrompt);
+            requestResponseLogger.logRequest("generateRRFDocument", requestBody);
+            
+            Map<String, Object> responseMap = postToGemini("generateRRFDocument", requestBody);
+            requestResponseLogger.logResponse("generateRRFDocument", responseMap);
+            
+            // Extract content using Gemini format
+            String rrfContent = extractTextFromGeminiResponse(responseMap);
+            
+            if (rrfContent == null || rrfContent.trim().isEmpty()) {
+                throw new AIAnalysisException("LLM returned empty RRF document");
+            }
+            
+            log.info("Successfully generated RRF document ({} characters)", rrfContent.length());
+            return rrfContent;
+            
+        } catch (Exception e) {
+            log.error("Failed to generate RRF document with LLM", e);
+            throw new AIAnalysisException("Failed to generate RRF document", e);
+        }
     }
 
     @FunctionalInterface
