@@ -82,6 +82,9 @@ dependencies {
     // DJL (Deep Java Library) for tokenization
     implementation 'ai.djl.huggingface:tokenizers:0.25.0'
 
+    // JSoup for HTML parsing and email cleaning
+    implementation 'org.jsoup:jsoup:1.17.1'
+
     implementation 'com.bracits:bpa-client-spring-boot-starter:3.1.0.2-SNAPSHOT'
     // Testing
     testImplementation 'org.springframework.boot:spring-boot-starter-test'

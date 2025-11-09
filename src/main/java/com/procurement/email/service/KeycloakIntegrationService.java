@@ -47,6 +47,7 @@ public class KeycloakIntegrationService {
             userContext.setEmail(email);
             userContext.setDesignation("Admin");
             userContext.setRole("Manager");
+            userContext.setUsername("bipul");
             return Optional.of(userContext);
         }
         else

@@ -4,19 +4,12 @@ import com.bracits.abs.bpaclient.BusinessProcessAutomationClient;
 import com.bracits.abs.bpaclient.dto.Action;
 import com.bracits.abs.bpaclient.dto.TaskPerformRequest;
 import com.bracits.abs.bpaclient.dto.WorkflowDto;
-import com.procurement.email.model.Item;
-import com.procurement.email.model.PurchaseOrder;
-import jakarta.mail.MessagingException;
-import jakarta.mail.internet.MimeMessage;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.mail.javamail.JavaMailSender;
-import org.springframework.mail.javamail.MimeMessageHelper;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
 import java.lang.reflect.InvocationTargetException;
-import java.math.BigDecimal;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.net.http.HttpClient;
@@ -24,85 +17,111 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.format.DateTimeFormatter;
-import java.util.List;
 import java.util.Map;
 
 /**
- * Service for sending procurement-related emails with retry logic.
+ * Service for sending procurement-related emails with human-in-the-middle workflow automation.
  */
 @Service
 @RequiredArgsConstructor
 @Slf4j
 public class HumanInTheMiddleService {
 
-    private final JavaMailSender mailSender;
-    private final InventoryService inventoryService;
-    private static final int MAX_RETRY_ATTEMPTS = 3;
-    private static final long RETRY_DELAY_MS = 2000;
-    private static final DateTimeFormatter DATE_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+  private final InventoryService inventoryService;
+  private final BusinessProcessAutomationClient businessProcessAutomationClient;
 
-    private final BusinessProcessAutomationClient businessProcessAutomationClient;
+  private static final int MAX_RETRY_ATTEMPTS = 3;
+  private static final long RETRY_DELAY_MS = 2000;
+  private static final DateTimeFormatter DATE_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
-    public void sendForApproval(String to, PurchaseOrder po, String inReplyToMessageId, String originalSubject) {
+  private static final String TOKEN_URL = "https://bracusso.bracits.net/realms/usis/protocol/openid-connect/token";
+  private static final String CLIENT_ID = "admin-client";
+  private static final String CLIENT_SECRET = "GTVpX1x6ee12Zwrm6HwEZPvHppXVsZio";
+  private static final String GRANT_TYPE = "client_credentials";
 
-        String url = "https://bracusso.bracits.net/realms/usis/protocol/openid-connect/token";
-        String clientId = "slm-manage-user";
-        String clientSecret = "R5asm0brJPi6DXc0xHB2PnF7pai9mNuG";
-        String grantType = "client_credentials";
+  /**
+   * Starts a procurement automation workflow.
+   */
+  public void startProcess(String to, String poNumber, String inReplyToMessageId, String originalSubject, String user, boolean first) {
+    String token = getAccessToken();
 
-        String formData = "client_id=" + URLEncoder.encode(clientId, StandardCharsets.UTF_8)
-            + "&grant_type=" + URLEncoder.encode(grantType, StandardCharsets.UTF_8)
-            + "&client_secret=" + URLEncoder.encode(clientSecret, StandardCharsets.UTF_8);
+    WorkflowDto workflowDto = new WorkflowDto();
+    workflowDto.setAction("start");
+    workflowDto.setKey("procurementAutomation");
+    workflowDto.setRef(poNumber);
 
-        HttpRequest request = HttpRequest.newBuilder()
-            .uri(URI.create(url))
-            .header("Content-Type", "application/x-www-form-urlencoded")
-            .POST(HttpRequest.BodyPublishers.ofString(formData))
-            .build();
+    TaskPerformRequest taskPerformRequest = new TaskPerformRequest();
+    taskPerformRequest.setModule("proc");
+    taskPerformRequest.setTitle(originalSubject);
+    taskPerformRequest.setInitiatorProxy(user);
+    taskPerformRequest.setKey(workflowDto.getKey());
+    taskPerformRequest.setRef(workflowDto.getRef());
+    taskPerformRequest.setAction(new Action(workflowDto.getAction()));
+    taskPerformRequest.setVariables(Map.of("first", String.valueOf(first)));
 
-        HttpClient client = HttpClient.newHttpClient();
-        HttpResponse<String> response = null;
-        try {
-            response = client.send(request, HttpResponse.BodyHandlers.ofString());
-        } catch (IOException e) {
-          throw new RuntimeException(e);
-        } catch (InterruptedException e) {
-          throw new RuntimeException(e);
-        }
+    performWorkflow(token, taskPerformRequest, workflowDto);
+  }
 
+  /**
+   * Performs a workflow action (approve/reject/etc.).
+   */
+  public void perform(String from, String poNumber, String messageId, String subject, String username, boolean first, String action) {
+    String token = getAccessToken();
 
-      String token = "Bearer"+response.body().split("\"access_token\":\"")[1].split("\"")[0];
+    WorkflowDto workflowDto = new WorkflowDto();
+    workflowDto.setAction(action);
+    workflowDto.setKey("procurementAutomation");
+    workflowDto.setRef(poNumber);
 
+    TaskPerformRequest taskPerformRequest = new TaskPerformRequest();
+    taskPerformRequest.setModule("proc");
+    taskPerformRequest.setTitle(subject);
+    taskPerformRequest.setKey(workflowDto.getKey());
+    taskPerformRequest.setRef(workflowDto.getRef());
+    taskPerformRequest.setAction(new Action(workflowDto.getAction()));
+    taskPerformRequest.setVariables(Map.of("first", String.valueOf(first)));
 
-        WorkflowDto workflowDto = new WorkflowDto();
+    performWorkflow(token, taskPerformRequest, workflowDto);
+  }
 
-        workflowDto.setAction("start");
-        workflowDto.setKey("ProcurementAutomation");
-        workflowDto.setRef(po.getPoNumber());
-
-
-
-
-        TaskPerformRequest taskPerformRequest = new TaskPerformRequest();
-        taskPerformRequest.setModule("proc");
-        taskPerformRequest.setKey(workflowDto.getKey());
-        taskPerformRequest.setTitle(workflowDto.getTitle());
-        taskPerformRequest.setRef(workflowDto.getRef());
-        taskPerformRequest.setAction(new Action(workflowDto.getAction()));
-
-        try {
-            businessProcessAutomationClient.perform(token,taskPerformRequest, workflowDto);
-
-        } catch (InvocationTargetException e) {
-          throw new RuntimeException(e);
-        } catch (NoSuchMethodException e) {
-          throw new RuntimeException(e);
-        } catch (IllegalAccessException e) {
-          throw new RuntimeException(e);
-        } catch (InstantiationException e) {
-          throw new RuntimeException(e);
-        }
-
-
+  /**
+   * Common helper to call BPA client.
+   */
+  private void performWorkflow(String token, TaskPerformRequest taskPerformRequest, WorkflowDto workflowDto) {
+    try {
+      businessProcessAutomationClient.perform(token, taskPerformRequest, workflowDto);
+    } catch (InvocationTargetException | NoSuchMethodException | IllegalAccessException | InstantiationException e) {
+      throw new RuntimeException("Failed to perform workflow action", e);
     }
+  }
+
+  /**
+   * Fetches OAuth2 token from Keycloak.
+   */
+  private String getAccessToken() {
+    String formData = "client_id=" + URLEncoder.encode(CLIENT_ID, StandardCharsets.UTF_8)
+        + "&grant_type=" + URLEncoder.encode(GRANT_TYPE, StandardCharsets.UTF_8)
+        + "&client_secret=" + URLEncoder.encode(CLIENT_SECRET, StandardCharsets.UTF_8);
+
+    HttpRequest request = HttpRequest.newBuilder()
+        .uri(URI.create(TOKEN_URL))
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .POST(HttpRequest.BodyPublishers.ofString(formData))
+        .build();
+
+    try {
+      HttpClient client = HttpClient.newHttpClient();
+      HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+
+      if (response.statusCode() != 200) {
+        throw new RuntimeException("Failed to fetch access token: " + response.body());
+      }
+
+      String body = response.body();
+      String token = body.split("\"access_token\":\"")[1].split("\"")[0];
+      return "Bearer " + token;
+    } catch (IOException | InterruptedException e) {
+      throw new RuntimeException("Error while fetching access token", e);
+    }
+  }
 }

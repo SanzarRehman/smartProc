@@ -25,6 +25,7 @@ public class EmailSenderService {
 
     private final JavaMailSender mailSender;
     private final InventoryService inventoryService;
+    private final EmailCleaningService emailCleaningService;
     private static final int MAX_RETRY_ATTEMPTS = 3;
     private static final long RETRY_DELAY_MS = 2000;
     private static final DateTimeFormatter DATE_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
@@ -53,7 +54,14 @@ public class EmailSenderService {
         
         String body = buildRecommendationEmailBody(recommendations, similarProducts, request);
         
-        sendEmailWithRetry(to, subject, body, inReplyToMessageId);
+        // Send the email and get the message ID
+        String systemMessageId = sendEmailWithRetry(to, subject, body, inReplyToMessageId);
+        
+        // Save system email to thread
+        if (systemMessageId != null && request.getPoNumber() != null) {
+            saveSystemEmailToThread(to, subject, body, systemMessageId, inReplyToMessageId, 
+                                   request.getPoNumber(), "RECOMMENDATIONS_SENT");
+        }
     }
     
     /**
@@ -77,7 +85,14 @@ public class EmailSenderService {
         
         String body = buildNewPurchaseConfirmationEmailBody(request);
         
-        sendEmailWithRetry(to, subject, body, inReplyToMessageId);
+        // Send the email and get the message ID
+        String systemMessageId = sendEmailWithRetry(to, subject, body, inReplyToMessageId);
+        
+        // Save system email to thread
+        if (systemMessageId != null && request.getPoNumber() != null) {
+            saveSystemEmailToThread(to, subject, body, systemMessageId, inReplyToMessageId, 
+                                   request.getPoNumber(), "RECOMMENDATIONS_SENT");
+        }
     }
 
     /**
@@ -99,8 +114,15 @@ public class EmailSenderService {
         
         String body = buildConfirmationEmailBody(po);
         
-        sendEmailWithRetry(to, subject, body, inReplyToMessageId);
-
+        // Send the email and get the message ID
+        String systemMessageId = sendEmailWithRetry(to, subject, body, inReplyToMessageId);
+        
+        // Save system email to thread - extract PO number from email processing state
+        if (systemMessageId != null && po.getPoNumber() != null) {
+            // Try to extract the PO number from processing state
+            saveSystemEmailToThread(to, subject, body, systemMessageId, inReplyToMessageId, 
+                                   po.getPoNumber(), "COMPLETION_SENT");
+        }
     }
 
     /**
@@ -108,14 +130,30 @@ public class EmailSenderService {
      *
      * @param to the recipient email address
      * @param errorMessage the error message to include
+     * @param inReplyToMessageId the message ID of the original email (for threading, optional)
+     * @param poNumber the PO number for this thread (optional)
      */
-    public void sendErrorEmail(String to, String errorMessage) {
-        log.info("Sending error email to: {}", to);
+    public void sendErrorEmail(String to, String errorMessage, String inReplyToMessageId, String poNumber) {
+        log.info("Sending error email to: {} (in reply to: {})", to, inReplyToMessageId);
         
         String subject = "Procurement Request - Processing Error";
         String body = buildErrorEmailBody(errorMessage);
         
-        sendEmailWithRetry(to, subject, body);
+        // Send the email and get the message ID
+        String systemMessageId = sendEmailWithRetry(to, subject, body, inReplyToMessageId);
+        
+        // Save system email to thread if PO number is available
+        if (systemMessageId != null && poNumber != null) {
+            saveSystemEmailToThread(to, subject, body, systemMessageId, inReplyToMessageId, 
+                                   poNumber, "ERROR");
+        }
+    }
+    
+    /**
+     * Overloaded method for backward compatibility - without reply-to and PO number.
+     */
+    public void sendErrorEmail(String to, String errorMessage) {
+        sendErrorEmail(to, errorMessage, null, null);
     }
 
     /**
@@ -125,8 +163,9 @@ public class EmailSenderService {
      * @param missingFields list of missing required fields
      * @param inReplyToMessageId the message ID of the original email (for threading)
      * @param originalSubject the subject of the original email
+     * @param poNumber the PO number for this thread (optional)
      */
-    public void sendTemplateGuideEmail(String to, List<String> missingFields, String inReplyToMessageId, String originalSubject) {
+    public void sendTemplateGuideEmail(String to, List<String> missingFields, String inReplyToMessageId, String originalSubject, String poNumber) {
         log.info("Sending template guide email to: {} (missing fields: {})", to, missingFields);
         
         // Use "Re: " + original subject for proper email threading
@@ -137,21 +176,51 @@ public class EmailSenderService {
         
         String body = buildTemplateGuideEmailBody(missingFields);
         
-        sendEmailWithRetry(to, subject, body, inReplyToMessageId);
+        // Send the email and get the message ID
+        String systemMessageId = sendEmailWithRetry(to, subject, body, inReplyToMessageId);
+        
+        // Save system email to thread if PO number is available
+        if (systemMessageId != null && poNumber != null) {
+            saveSystemEmailToThread(to, subject, body, systemMessageId, inReplyToMessageId, 
+                                   poNumber, "EMAIL_RECEIVED");
+        }
+    }
+    
+    /**
+     * Overloaded method for backward compatibility - without PO number.
+     */
+    public void sendTemplateGuideEmail(String to, List<String> missingFields, String inReplyToMessageId, String originalSubject) {
+        sendTemplateGuideEmail(to, missingFields, inReplyToMessageId, originalSubject, null);
     }
 
     /**
      * Sends a user registration request email.
      *
      * @param to the recipient email address
+     * @param inReplyToMessageId the message ID of the original email (for threading, optional)
+     * @param poNumber the PO number for this thread (optional)
      */
-    public void sendRegistrationRequestEmail(String to) {
-        log.info("Sending registration request email to: {}", to);
+    public void sendRegistrationRequestEmail(String to, String inReplyToMessageId, String poNumber) {
+        log.info("Sending registration request email to: {} (in reply to: {})", to, inReplyToMessageId);
         
         String subject = "Procurement System - Registration Required";
         String body = buildRegistrationRequestEmailBody();
         
-        sendEmailWithRetry(to, subject, body);
+        // Send the email and get the message ID
+        String systemMessageId = sendEmailWithRetry(to, subject, body, inReplyToMessageId);
+        
+        // Save system email to thread if PO number is available
+        if (systemMessageId != null && poNumber != null) {
+            saveSystemEmailToThread(to, subject, body, systemMessageId, inReplyToMessageId, 
+                                   poNumber, "USER_NOT_FOUND");
+        }
+    }
+    
+    /**
+     * Overloaded method for backward compatibility - without reply-to and PO number.
+     */
+    public void sendRegistrationRequestEmail(String to) {
+        sendRegistrationRequestEmail(to, null, null);
     }
 
     /**
@@ -160,21 +229,22 @@ public class EmailSenderService {
      * @param to the recipient email address
      * @param subject the email subject
      * @param body the email body (HTML)
+     * @return the message ID of the sent email, or null if failed
      */
-    private void sendEmailWithRetry(String to, String subject, String body) {
-        sendEmailWithRetry(to, subject, body, null);
+    private String sendEmailWithRetry(String to, String subject, String body) {
+        return sendEmailWithRetry(to, subject, body, null);
     }
     
-    private void sendEmailWithRetry(String to, String subject, String body, String inReplyToMessageId) {
+    private String sendEmailWithRetry(String to, String subject, String body, String inReplyToMessageId) {
         int attempt = 0;
         Exception lastException = null;
         
         while (attempt < MAX_RETRY_ATTEMPTS) {
             attempt++;
             try {
-                sendEmail(to, subject, body, inReplyToMessageId);
+                String messageId = sendEmail(to, subject, body, inReplyToMessageId);
                 log.info("Email sent successfully to {} on attempt {}", to, attempt);
-                return;
+                return messageId;
             } catch (Exception e) {
                 lastException = e;
                 log.warn("Failed to send email to {} on attempt {}: {}", to, attempt, e.getMessage());
@@ -201,13 +271,14 @@ public class EmailSenderService {
      * @param to the recipient email address
      * @param subject the email subject
      * @param body the email body (HTML)
+     * @return the message ID of the sent email
      * @throws MessagingException if email sending fails
      */
-    private void sendEmail(String to, String subject, String body) throws MessagingException {
-        sendEmail(to, subject, body, null);
+    private String sendEmail(String to, String subject, String body) throws MessagingException {
+        return sendEmail(to, subject, body, null);
     }
     
-    private void sendEmail(String to, String subject, String body, String inReplyTo) throws MessagingException {
+    private String sendEmail(String to, String subject, String body, String inReplyTo) throws MessagingException {
         MimeMessage message = mailSender.createMimeMessage();
         MimeMessageHelper helper = new MimeMessageHelper(message, true, "UTF-8");
         
@@ -229,7 +300,39 @@ public class EmailSenderService {
         }
         
         mailSender.send(message);
-        log.info("Email sent to: {} with subject: {}", to, subject);
+        
+        // Get the message ID that was generated
+        String messageId = message.getMessageID();
+        log.info("Email sent to: {} with subject: {}, Message-ID: {}", to, subject, messageId);
+        
+        return messageId;
+    }
+    
+    /**
+     * Saves a system-generated email to the email thread.
+     *
+     * @param toEmail the recipient email address
+     * @param subject the email subject
+     * @param body the email body (HTML)
+     * @param messageId the message ID of the sent email
+     * @param parentMessageId the message ID this email is replying to
+     * @param poNumber the PO number for this thread
+     * @param processingState the current processing state
+     */
+    private void saveSystemEmailToThread(String toEmail, String subject, String body, 
+                                        String messageId, String parentMessageId, 
+                                        String poNumber, String processingState) {
+        try {
+            // Save to thread via EmailCleaningService with the actual message ID and parent
+            emailCleaningService.saveSystemEmail(poNumber, toEmail, subject, body, processingState, 
+                                                messageId, parentMessageId);
+            
+            log.info("Saved system email to thread: PO={}, MessageId={}, ParentId={}", 
+                    poNumber, messageId, parentMessageId);
+        } catch (Exception e) {
+            log.error("Failed to save system email to thread: PO={}, MessageId={}", poNumber, messageId, e);
+            // Don't throw - email was already sent successfully
+        }
     }
 
     /**

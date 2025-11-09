@@ -738,7 +738,278 @@ Use the "by requester" endpoints:
 
 ---
 
-## 🚀 Testing All APIs
+## � Email Thread APIs
+
+### 1. Get Emails by PO Number
+Get all emails in a thread (flat list, ordered by date).
+
+```bash
+curl http://localhost:8080/api/emails/po/PO-2025-0001
+```
+
+**Response Example:**
+```json
+[
+  {
+    "id": 1,
+    "poNumber": "PO-2025-0001",
+    "messageId": "<abc123@gmail.com>",
+    "parentMessageId": null,
+    "fromEmail": "john.doe@company.com",
+    "toEmail": "procurement@company.com",
+    "subject": "Need a new mouse",
+    "cleanedBody": "Hi, I need a wireless mouse for my workstation. Bluetooth preferred.",
+    "rawContent": "<html><body>Hi,<br>I need a wireless mouse...</body></html>",
+    "isSystemMessage": false,
+    "isProcurementRelated": true,
+    "processingState": "RECOMMENDATIONS_SENT",
+    "receivedAt": "2025-11-05T10:30:00",
+    "createdAt": "2025-11-05T10:30:05",
+    "depthLevel": 0
+  },
+  {
+    "id": 2,
+    "poNumber": "PO-2025-0001",
+    "messageId": "<system-PO-2025-0001-1730808010000@procurement.company.com>",
+    "parentMessageId": "<abc123@gmail.com>",
+    "fromEmail": "procurement@company.com",
+    "toEmail": "john.doe@company.com",
+    "subject": "Re: Need a new mouse - Recommendations",
+    "cleanedBody": "Here are some available options:\n1. Logitech MX Master 3...",
+    "rawContent": "Here are some available options:\n1. Logitech MX Master 3...",
+    "isSystemMessage": true,
+    "isProcurementRelated": true,
+    "processingState": "RECOMMENDATIONS_SENT",
+    "receivedAt": "2025-11-05T10:30:10",
+    "createdAt": "2025-11-05T10:30:10",
+    "depthLevel": 1
+  }
+]
+```
+
+---
+
+### 2. Get Email Thread Hierarchy
+Get nested email structure (parent-child relationships).
+
+```bash
+curl http://localhost:8080/api/emails/po/PO-2025-0001/hierarchy
+```
+
+**Response Example:**
+```json
+[
+  {
+    "email": {
+      "id": 1,
+      "poNumber": "PO-2025-0001",
+      "fromEmail": "john.doe@company.com",
+      "subject": "Need a new mouse",
+      "cleanedBody": "Hi, I need a wireless mouse...",
+      "receivedAt": "2025-11-05T10:30:00",
+      "depthLevel": 0
+    },
+    "children": [
+      {
+        "email": {
+          "id": 2,
+          "poNumber": "PO-2025-0001",
+          "fromEmail": "procurement@company.com",
+          "subject": "Re: Need a new mouse - Recommendations",
+          "receivedAt": "2025-11-05T10:30:10",
+          "depthLevel": 1
+        },
+        "children": [
+          {
+            "email": {
+              "id": 3,
+              "fromEmail": "john.doe@company.com",
+              "subject": "Re: Need a new mouse - Confirmation",
+              "receivedAt": "2025-11-05T11:00:00",
+              "depthLevel": 2
+            },
+            "children": []
+          }
+        ]
+      }
+    ]
+  }
+]
+```
+
+---
+
+### 3. Get Email by Message ID
+Retrieve a specific email.
+
+```bash
+curl http://localhost:8080/api/emails/message/%3Cabc123@gmail.com%3E
+```
+
+**Response Example:**
+```json
+{
+  "id": 1,
+  "poNumber": "PO-2025-0001",
+  "messageId": "<abc123@gmail.com>",
+  "fromEmail": "john.doe@company.com",
+  "subject": "Need a new mouse",
+  "cleanedBody": "Hi, I need a wireless mouse for my workstation.",
+  "rawContent": "<html><body>Hi,<br>I need a wireless mouse...</body></html>",
+  "isProcurementRelated": true,
+  "processingState": "RECOMMENDATIONS_SENT",
+  "receivedAt": "2025-11-05T10:30:00"
+}
+```
+
+---
+
+### 4. Get Emails by Sender
+Get all emails from a specific person.
+
+```bash
+curl http://localhost:8080/api/emails/sender/john.doe@company.com
+```
+
+**Response Example:**
+```json
+[
+  {
+    "id": 1,
+    "poNumber": "PO-2025-0001",
+    "fromEmail": "john.doe@company.com",
+    "subject": "Need a new mouse",
+    "receivedAt": "2025-11-05T10:30:00"
+  },
+  {
+    "id": 3,
+    "poNumber": "PO-2025-0001",
+    "fromEmail": "john.doe@company.com",
+    "subject": "Re: Need a new mouse - Confirmation",
+    "receivedAt": "2025-11-05T11:00:00"
+  }
+]
+```
+
+---
+
+### 5. Get Procurement Emails Only
+Filter to show only procurement-related emails.
+
+```bash
+curl http://localhost:8080/api/emails/procurement
+```
+
+---
+
+### 6. Get Emails by Processing State
+Filter emails by their processing state.
+
+```bash
+# Get all emails waiting for recommendations
+curl http://localhost:8080/api/emails/state/RECOMMENDATIONS_SENT
+
+# Get non-procurement emails
+curl http://localhost:8080/api/emails/state/NOT_PROCUREMENT
+
+# Get error emails
+curl http://localhost:8080/api/emails/state/ERROR
+```
+
+---
+
+### 7. Get Recent Emails
+Get emails from the last N days.
+
+```bash
+# Last 7 days (default)
+curl http://localhost:8080/api/emails/recent
+
+# Last 30 days
+curl "http://localhost:8080/api/emails/recent?days=30"
+```
+
+---
+
+### 8. Get All PO Numbers
+List all email threads/conversations.
+
+```bash
+curl http://localhost:8080/api/emails/po-numbers
+```
+
+**Response Example:**
+```json
+[
+  "PO-2025-0005",
+  "PO-2025-0004",
+  "PO-2025-0003",
+  "PO-2025-0002",
+  "PO-2025-0001"
+]
+```
+
+---
+
+### 9. Get Thread Statistics
+Get statistics for a specific email thread.
+
+```bash
+curl http://localhost:8080/api/emails/po/PO-2025-0001/stats
+```
+
+**Response Example:**
+```json
+{
+  "totalEmails": 5,
+  "procurementEmails": 5,
+  "systemEmails": 2,
+  "participants": [
+    "john.doe@company.com",
+    "procurement@company.com"
+  ],
+  "participantCount": 2,
+  "firstEmail": "2025-11-05T10:30:00",
+  "lastEmail": "2025-11-05T12:00:00",
+  "stateBreakdown": {
+    "EMAIL_RECEIVED": 1,
+    "RECOMMENDATIONS_SENT": 2,
+    "CONFIRMATION_RECEIVED": 1,
+    "COMPLETION_SENT": 1
+  }
+}
+```
+
+---
+
+### 10. Search Emails
+Search by subject or body content.
+
+```bash
+# Search for emails about mice
+curl "http://localhost:8080/api/emails/search?query=mouse"
+
+# Search for emails about laptops
+curl "http://localhost:8080/api/emails/search?query=laptop"
+```
+
+**Response Example:**
+```json
+[
+  {
+    "id": 1,
+    "poNumber": "PO-2025-0001",
+    "fromEmail": "john.doe@company.com",
+    "subject": "Need a new mouse",
+    "cleanedBody": "Hi, I need a wireless mouse for my workstation.",
+    "receivedAt": "2025-11-05T10:30:00"
+  }
+]
+```
+
+---
+
+## �🚀 Testing All APIs
 
 Run this script to test all endpoints:
 
@@ -765,6 +1036,43 @@ curl -s "$BASE_URL/api/gl/stats" | jq '.'
 echo -e "\n=== Testing Vector Search APIs ==="
 curl -s "$BASE_URL/api/inventory/vector/search?query=mouse&limit=3" | jq '.'
 curl -s "$BASE_URL/api/inventory/vector/search/scores?query=laptop&limit=3" | jq '.'
+
+echo -e "\n=== Testing Email Thread APIs ==="
+curl -s "$BASE_URL/api/emails/po-numbers" | jq '.'
+curl -s "$BASE_URL/api/emails/procurement" | jq '.[] | {id, poNumber, fromEmail, subject, receivedAt}'
+curl -s "$BASE_URL/api/emails/recent?days=7" | jq '.'
 ```
 
 Save this as `test-apis.sh`, make it executable with `chmod +x test-apis.sh`, and run it!
+
+---
+
+## 📝 Email Processing Flow
+
+### How Email Threads Work:
+
+1. **Email Arrives** → System generates `PO-YYYY-NNNN` immediately
+2. **Email Saved** → Raw + cleaned content stored in `email_threads` table
+3. **Classification** → AI determines if procurement-related
+4. **Processing State** → Saved in `email_processing_states` table
+5. **All Emails Tracked** → Even non-procurement emails get PO number for audit trail
+
+### PO Number Format:
+- **PO-2025-0001** → Year + Sequential number
+- Every email gets a unique PO number
+- All replies in a thread share the same PO number
+- System emails (recommendations, confirmations) also logged with PO number
+
+### Email Cleaning Features:
+- ✅ HTML stripped to plain text
+- ✅ Email signatures removed
+- ✅ Quoted reply text removed (lines starting with `>`)
+- ✅ Reply headers removed (e.g., "On Mon, Nov 5...")
+- ✅ Excessive whitespace cleaned
+- ✅ Original raw content preserved in `rawContent` field
+
+### Thread Hierarchy:
+- **depth_level = 0** → Original email
+- **depth_level = 1** → First reply
+- **depth_level = 2** → Reply to reply
+- Parent-child relationships maintained via `parent_message_id`

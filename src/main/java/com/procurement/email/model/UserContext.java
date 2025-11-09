@@ -12,4 +12,5 @@ public class UserContext {
     private String role;
     private String designation;
     private Map<String, String> preferences;
+    private String username;
 }

@@ -21,4 +21,5 @@ public class ProcurementRequest {
     private String additionalNotes;
     private LocalDateTime requestDate;
     private List<String> candidateItemIds;
+    private String poNumber;  // PO number for tracking email thread
 }

@@ -47,15 +47,16 @@ public class IntegrationFlowConfig {
             try {
                 EmailMessage email = (EmailMessage) message.getPayload();
                 log.info("Service activator received incoming email from: {}", email.getFrom());
-                
+                emailProcessingService.processIncomingEmail(email);
+
                 // Route to appropriate handler based on email type
-                if (isConfirmationEmail(email)) {
-                    log.debug("Email identified as confirmation, routing to confirmation handler");
-                    emailProcessingService.processConfirmationEmail(email);
-                } else {
-                    log.debug("Email identified as new request, routing to incoming handler");
-                    emailProcessingService.processIncomingEmail(email);
-                }
+//                if (isConfirmationEmail(email)) {
+//                    log.debug("Email identified as confirmation, routing to confirmation handler");
+//                    emailProcessingService.processConfirmationEmail(email);
+//                } else {
+//                    log.debug("Email identified as new request, routing to incoming handler");
+//                    emailProcessingService.processIncomingEmail(email);
+//                }
                 
             } catch (Exception e) {
                 log.error("Error in incoming email handler", e);
@@ -64,24 +65,24 @@ public class IntegrationFlowConfig {
         };
     }
 
-    /**
-     * Service activator for confirmation emails.
-     * Routes confirmation emails to EmailProcessingService.processConfirmationEmail().
-     */
-    @Bean
-    @ServiceActivator(inputChannel = "confirmationChannel")
-    public MessageHandler confirmationEmailHandler() {
-        return message -> {
-            try {
-                EmailMessage email = (EmailMessage) message.getPayload();
-                log.info("Service activator received confirmation email from: {}", email.getFrom());
-                emailProcessingService.processConfirmationEmail(email);
-            } catch (Exception e) {
-                log.error("Error in confirmation email handler", e);
-                throw new RuntimeException("Failed to process confirmation email", e);
-            }
-        };
-    }
+//    /**
+//     * Service activator for confirmation emails.
+//     * Routes confirmation emails to EmailProcessingService.processConfirmationEmail().
+//     */
+//    @Bean
+//    @ServiceActivator(inputChannel = "confirmationChannel")
+//    public MessageHandler confirmationEmailHandler() {
+//        return message -> {
+//            try {
+//                EmailMessage email = (EmailMessage) message.getPayload();
+//                log.info("Service activator received confirmation email from: {}", email.getFrom());
+//                emailProcessingService.processConfirmationEmail(email);
+//            } catch (Exception e) {
+//                log.error("Error in confirmation email handler", e);
+//                throw new RuntimeException("Failed to process confirmation email", e);
+//            }
+//        };
+//    }
 
     /**
      * Message router to distinguish between new requests and confirmations.
