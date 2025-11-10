@@ -28,7 +28,7 @@ import java.util.*;
 @Slf4j
 public class EmailProcessingService {
 
-    private final GeminiAIService geminiAIService;
+    private final AIService geminiAIService;  // Can be GeminiAIService or OpenRouterAIService
     private final KeycloakIntegrationService keycloakIntegrationService;
     private final InventoryService inventoryService;
     private final InventoryVectorService inventoryVectorService;

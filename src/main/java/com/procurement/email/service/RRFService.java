@@ -26,7 +26,7 @@ import java.util.Optional;
 public class RRFService {
     
     private final RequestForRequisitionRepository rrfRepository;
-    private final GeminiAIService aiService;
+    private final AIService aiService;  // Can be GeminiAIService or OpenRouterAIService
     private final ObjectMapper objectMapper;
     
     private static final DateTimeFormatter DATE_FORMATTER = DateTimeFormatter.ofPattern("MMMM dd, yyyy");

@@ -1,8 +1,10 @@
 package com.procurement.email.config;
 
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.web.client.RestTemplateBuilder;
 import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
 import org.springframework.http.client.ClientHttpRequestInterceptor;
 import org.springframework.web.client.RestTemplate;
 
@@ -10,19 +12,21 @@ import java.time.Duration;
 
 /**
  * Configuration for OpenRouter AI API integration.
- * DISABLED - Using Gemini instead
+ * Provides RestTemplate configured with API key and timeout settings.
  */
-//@Configuration
+@Configuration
+@Slf4j
 public class OpenRouterConfig {
 
-    @Value("${openrouter.api.key:}")
+    @Value("${openrouter.api.key}")
     private String apiKey;
 
     @Value("${openrouter.api.timeout:30000}")
     private int timeout;
 
-    @Bean
+    @Bean(name = "openRouterRestTemplate")
     public RestTemplate openRouterRestTemplate(RestTemplateBuilder builder) {
+        log.info("Configuring OpenRouter RestTemplate with timeout: {}ms", timeout);
         return builder
                 .setConnectTimeout(Duration.ofMillis(timeout))
                 .setReadTimeout(Duration.ofMillis(timeout))
