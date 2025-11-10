@@ -1033,23 +1033,28 @@ public class EmailProcessingService {
             inventoryService.decrementItemQuantity(selectedItem.getId(), request.getQuantity());
             log.info("Inventory decremented for item {}", selectedItem.getId());
             
-            // Step 2: Record in GL
+            // Step 2: Update PurchaseOrder status to APPROVED
+            procurementAgentService.updatePurchaseOrderStatus(poNumber, "APPROVED");
+            log.info("Purchase order status updated to APPROVED");
+            
+            // Step 3: Record in GL
             accountingAgentService.recordInventoryAllocation(selectedItem, userContext,poOpt.get().getPoNumber());
             updateState(state, STATE_ACCOUNTING_UPDATED, request);
             log.info("GL entry recorded for inventory allocation");
             
-            // Step 3: Update state to PO_GENERATED (PO was already created before approval)
+            // Step 4: Update state to PO_GENERATED (PO was already created before approval)
             updateState(state, STATE_PO_GENERATED, request);
             log.info("Purchase order confirmed: {}", purchaseOrder.getPoNumber());
             
-            // Step 4: Send confirmation email
-            String subject = request.getItemName() != null ? request.getItemName() : request.getItemType();
+            // Step 5: Send confirmation email with proper threading
             String inReplyToMessageId = state.getLastMessageId() != null ? state.getLastMessageId() : state.getEmailMessageId();
+            String originalSubject = getOriginalSubjectFromThread(poNumber);
+            
             emailSenderService.sendConfirmationEmail(
                 state.getRequesterEmail(), 
                 purchaseOrder, 
                 inReplyToMessageId, 
-                "Re: " + subject
+                originalSubject != null && !originalSubject.startsWith("Re:") ? "Re: " + originalSubject : originalSubject
             );
             updateState(state, STATE_COMPLETION_SENT, request);
             log.info("Confirmation email sent to {} (in reply to: {})", state.getRequesterEmail(), inReplyToMessageId);
@@ -1111,23 +1116,28 @@ public class EmailProcessingService {
             // Process procurement (approved)
             log.info("Approved: Processing new purchase for user {}", userContext.getUsername());
             
-            // Step 1: Update state to PO_GENERATED (PO was already created, just updating state)
+            // Step 1: Update PurchaseOrder status to APPROVED
+            procurementAgentService.updatePurchaseOrderStatus(poNumber, "APPROVED");
+            log.info("Purchase order status updated to APPROVED");
+            
+            // Step 2: Update state to PO_GENERATED (PO was already created, just updating state)
             updateState(state, STATE_PO_GENERATED, request);
             log.info("Purchase order confirmed: {}", purchaseOrder.getPoNumber());
             
-            // Step 2: Record in GL
+            // Step 3: Record in GL
             accountingAgentService.recordPurchaseTransaction(purchaseOrder);
             updateState(state, STATE_ACCOUNTING_UPDATED, request);
             log.info("GL entry recorded for new purchase");
             
-            // Step 3: Send confirmation email
-            String subject = request.getItemName() != null ? request.getItemName() : request.getItemType();
+            // Step 4: Send confirmation email with proper threading
             String inReplyToMessageId = state.getLastMessageId() != null ? state.getLastMessageId() : state.getEmailMessageId();
+            String originalSubject = getOriginalSubjectFromThread(poNumber);
+            
             emailSenderService.sendConfirmationEmail(
                 state.getRequesterEmail(), 
                 purchaseOrder, 
                 inReplyToMessageId, 
-                "Re: " + subject
+                originalSubject != null && !originalSubject.startsWith("Re:") ? "Re: " + originalSubject : originalSubject
             );
             updateState(state, STATE_COMPLETION_SENT, request);
             log.info("Confirmation email sent to {} (in reply to: {})", state.getRequesterEmail(), inReplyToMessageId);
@@ -1137,6 +1147,36 @@ public class EmailProcessingService {
         } catch (Exception e) {
             log.error("Failed to resume procurement for PO: {}", poNumber, e);
             throw new RuntimeException("Failed to resume procurement", e);
+        }
+    }
+    
+    /**
+     * Helper method to get the original email subject from the thread.
+     * Returns the subject of the first email in the thread (root message).
+     */
+    private String getOriginalSubjectFromThread(String poNumber) {
+        try {
+            // Get all threads for this PO
+            List<EmailThread> threads = emailCleaningService.getEmailThreadsByPoNumber(poNumber);
+            
+            if (threads.isEmpty()) {
+                log.warn("No email threads found for PO: {}", poNumber);
+                return null;
+            }
+            
+            // Find the root message (first email without parent)
+            EmailThread rootMessage = threads.stream()
+                    .filter(t -> t.getParentMessageId() == null || t.getDepthLevel() == 0)
+                    .findFirst()
+                    .orElse(threads.get(0)); // Fallback to first thread
+            
+            String subject = rootMessage.getSubject();
+            log.debug("Found original subject for PO {}: {}", poNumber, subject);
+            return subject;
+            
+        } catch (Exception e) {
+            log.error("Failed to get original subject for PO: {}", poNumber, e);
+            return null;
         }
     }
 

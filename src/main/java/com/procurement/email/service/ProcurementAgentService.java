@@ -120,4 +120,26 @@ public class ProcurementAgentService {
         log.debug("Looking up PurchaseOrder for PO: {}", poNumber);
         return purchaseOrderRepository.findByPoNumber(poNumber);
     }
+    
+    /**
+     * Updates the status of a purchase order.
+     * 
+     * @param poNumber the PO number
+     * @param newStatus the new status (e.g., "APPROVED", "REJECTED", "COMPLETED")
+     * @return the updated PurchaseOrder
+     */
+    @Transactional
+    public PurchaseOrder updatePurchaseOrderStatus(String poNumber, String newStatus) {
+        log.info("Updating PurchaseOrder status for PO: {} to {}", poNumber, newStatus);
+        
+        PurchaseOrder purchaseOrder = purchaseOrderRepository.findByPoNumber(poNumber)
+                .orElseThrow(() -> new IllegalArgumentException("PurchaseOrder not found for PO: " + poNumber));
+        
+        purchaseOrder.setStatus(newStatus);
+        
+        PurchaseOrder updated = purchaseOrderRepository.save(purchaseOrder);
+        log.info("PurchaseOrder status updated successfully: PO {}, Status: {}", poNumber, newStatus);
+        
+        return updated;
+    }
 }

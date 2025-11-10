@@ -327,6 +327,15 @@ public class EmailCleaningService {
     }
     
     /**
+     * Get all email threads for a PO number (flat list, ordered by received time).
+     * Useful for finding the original email subject or iterating through all emails.
+     */
+    public List<EmailThread> getEmailThreadsByPoNumber(String poNumber) {
+        log.debug("Fetching all email threads for PO: {}", poNumber);
+        return emailThreadRepository.findByPoNumberOrderByReceivedAtAsc(poNumber);
+    }
+    
+    /**
      * Recursively build thread node with children.
      */
     private EmailThreadNode buildThreadNode(EmailThread thread, Map<String, EmailThread> threadMap) {
