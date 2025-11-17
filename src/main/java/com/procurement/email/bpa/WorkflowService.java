@@ -36,7 +36,7 @@ public class WorkflowService {
       throws InvocationTargetException, NoSuchMethodException, InstantiationException,
       IllegalAccessException {
 
-    String token = request.getHeader("Authorization"); // ✅ get from incoming request
+    String token = request.getHeader("Authorization");
     if (token == null || token.isBlank()) {
       throw new RuntimeException("Missing Authorization header");
     }

@@ -126,6 +126,36 @@ public class EmailSenderService {
     }
 
     /**
+     * Sends an inventory allocation confirmation email (item moved from inventory to user).
+     *
+     * @param to the recipient email address
+     * @param po the purchase order
+     * @param item the allocated item from inventory
+     * @param inReplyToMessageId the message ID of the original email (for threading)
+     * @param originalSubject the subject of the original email
+     */
+    public void sendInventoryAllocationEmail(String to, PurchaseOrder po, Item item, String inReplyToMessageId, String originalSubject) {
+        log.info("Sending inventory allocation email to: {} for PO: {} (in reply to: {})", to, po.getPoNumber(), inReplyToMessageId);
+        
+        // Use "Re: " + original subject for proper email threading
+        String subject = originalSubject;
+        if (!subject.toLowerCase().startsWith("re:")) {
+            subject = "Re: " + subject;
+        }
+        
+        String body = buildInventoryAllocationEmailBody(po, item);
+        
+        // Send the email and get the message ID
+        String systemMessageId = sendEmailWithRetry(to, subject, body, inReplyToMessageId);
+        
+        // Save system email to thread
+        if (systemMessageId != null && po.getPoNumber() != null) {
+            saveSystemEmailToThread(to, subject, body, systemMessageId, inReplyToMessageId, 
+                                   po.getPoNumber(), "COMPLETION_SENT");
+        }
+    }
+
+    /**
      * Sends an error notification email.
      *
      * @param to the recipient email address
@@ -649,6 +679,82 @@ public class EmailSenderService {
         
         html.append("<p>Thank you for using the Procurement Automation System!</p>");
         html.append("<p>Best regards,<br>Procurement Team</p>");
+        html.append("</body></html>");
+        
+        return html.toString();
+    }
+    
+    /**
+     * Builds the HTML body for inventory allocation confirmation email.
+     *
+     * @param po the purchase order
+     * @param item the allocated item from inventory
+     * @return the HTML email body
+     */
+    private String buildInventoryAllocationEmailBody(PurchaseOrder po, Item item) {
+        StringBuilder html = new StringBuilder();
+        html.append("<html><body>");
+        html.append("<h2>✓ Item Allocated from Inventory</h2>");
+        html.append("<p>Dear ").append(escapeHtml(po.getRequesterEmail())).append(",</p>");
+        html.append("<p>Great news! Your request has been approved and the item has been allocated to you from our inventory.</p>");
+        html.append("<br>");
+        
+        html.append("<div style='background-color: #e8f5e9; padding: 15px; border-left: 4px solid #4caf50; margin: 15px 0;'>");
+        html.append("<h3 style='margin-top: 0;'>Allocated Item</h3>");
+        html.append("<p style='font-size: 18px; margin: 5px 0;'><strong>").append(escapeHtml(po.getItemName())).append("</strong></p>");
+        html.append("<p style='margin: 5px 0;'>Quantity Allocated: <strong>").append(po.getQuantity()).append("</strong></p>");
+        html.append("<p style='margin: 5px 0;'>Item Value: <strong>$").append(formatCurrency(po.getAmount())).append("</strong></p>");
+        html.append("<p style='margin: 5px 0;'>Item ID: <strong>").append(escapeHtml(item.getId())).append("</strong></p>");
+        html.append("</div>");
+        
+        if (item.getSpecifications() != null && !item.getSpecifications().isEmpty()) {
+            html.append("<h3>Item Specifications</h3>");
+            html.append("<table border='0' cellpadding='5' cellspacing='0' style='margin-left: 20px;'>");
+            for (Map.Entry<String, String> entry : item.getSpecifications().entrySet()) {
+                // Skip the generic "type" or "subtype" field if it's redundant
+                if ((entry.getKey().equals("type") && entry.getValue().equals(po.getItemType())) ||
+                    entry.getKey().equals("subtype")) {
+                    continue;
+                }
+                html.append("<tr>");
+                html.append("<td style='padding-right: 20px;'><strong>").append(escapeHtml(formatSpecKey(entry.getKey()))).append(":</strong></td>");
+                html.append("<td>").append(escapeHtml(entry.getValue())).append("</td>");
+                html.append("</tr>");
+            }
+            html.append("</table>");
+            html.append("<br>");
+        }
+        
+        html.append("<h3>Allocation Details</h3>");
+        html.append("<table border='0' cellpadding='5' cellspacing='0' style='margin-left: 20px;'>");
+        html.append("<tr><td style='padding-right: 20px;'><strong>Allocation Number:</strong></td><td>").append(escapeHtml(po.getPoNumber())).append("</td></tr>");
+        html.append("<tr><td style='padding-right: 20px;'><strong>Status:</strong></td><td><span style='color: #4caf50;'><strong>").append(escapeHtml(po.getStatus())).append("</strong></span></td></tr>");
+        html.append("<tr><td style='padding-right: 20px;'><strong>Allocation Date:</strong></td><td>").append(po.getCreatedAt().format(DATE_FORMATTER)).append("</td></tr>");
+        html.append("<tr><td style='padding-right: 20px;'><strong>Source:</strong></td><td>Existing Inventory</td></tr>");
+        html.append("</table>");
+        html.append("<br>");
+        
+        html.append("<div style='background-color: #e3f2fd; padding: 15px; border-left: 4px solid #2196f3; margin: 15px 0;'>");
+        html.append("<p style='margin: 0;'><strong>📦 What Happens Next:</strong></p>");
+        html.append("<ul style='margin: 10px 0;'>");
+        html.append("<li>The item has been <strong>reserved for you</strong> and removed from available inventory</li>");
+        html.append("<li>The accounting entry has been recorded in the General Ledger</li>");
+        html.append("<li>You can collect your item from the inventory/stores department</li>");
+        html.append("<li>Please bring your employee ID and reference number: <strong>").append(escapeHtml(po.getPoNumber())).append("</strong></li>");
+        html.append("</ul>");
+        html.append("</div>");
+        
+        html.append("<div style='background-color: #f5f5f5; padding: 15px; border-left: 4px solid #9e9e9e; margin: 15px 0;'>");
+        html.append("<p style='margin: 0;'><strong>ℹ️ Important Notes:</strong></p>");
+        html.append("<ul style='margin: 10px 0;'>");
+        html.append("<li>No new purchase was required - this item was available in inventory</li>");
+        html.append("<li>The item value has been allocated to your department's budget</li>");
+        html.append("<li>For any questions, reference allocation number: <strong>").append(escapeHtml(po.getPoNumber())).append("</strong></li>");
+        html.append("</ul>");
+        html.append("</div>");
+        
+        html.append("<p>Thank you for using the Procurement Automation System!</p>");
+        html.append("<p>Best regards,<br>Inventory Management Team</p>");
         html.append("</body></html>");
         
         return html.toString();

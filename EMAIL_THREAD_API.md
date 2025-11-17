@@ -4,7 +4,7 @@ Complete API reference for managing email threads and conversations in the Procu
 
 ## Base URL
 ```
-http://localhost:8080
+http://localhost:8080/poc
 ```
 
 ---

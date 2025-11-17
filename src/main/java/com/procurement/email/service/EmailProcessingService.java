@@ -1050,14 +1050,15 @@ public class EmailProcessingService {
             String inReplyToMessageId = state.getLastMessageId() != null ? state.getLastMessageId() : state.getEmailMessageId();
             String originalSubject = getOriginalSubjectFromThread(poNumber);
             
-            emailSenderService.sendConfirmationEmail(
+            emailSenderService.sendInventoryAllocationEmail(
                 state.getRequesterEmail(), 
-                purchaseOrder, 
+                purchaseOrder,
+                selectedItem,
                 inReplyToMessageId, 
                 originalSubject != null && !originalSubject.startsWith("Re:") ? "Re: " + originalSubject : originalSubject
             );
             updateState(state, STATE_COMPLETION_SENT, request);
-            log.info("Confirmation email sent to {} (in reply to: {})", state.getRequesterEmail(), inReplyToMessageId);
+            log.info("Inventory allocation email sent to {} (in reply to: {})", state.getRequesterEmail(), inReplyToMessageId);
             
             log.info("✓ Successfully completed inventory allocation for PO: {}", poNumber);
             
